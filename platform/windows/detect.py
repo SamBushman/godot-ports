@@ -452,14 +452,19 @@ def configure_mingw(env):
             "dxguid",
             "ksuser",
             "imm32",
-            "bcrypt",
-            "avrt",
             "uuid",
-            "dwmapi",
         ]
     )
+    if env["target_win_version"] != "0x0501":
+        env.Append(LIBS=[
+            "bcrypt",
+            "avrt",
+            "dwmapi",
+        ])
 
-    env.Append(CPPDEFINES=["MINGW_ENABLED", ("MINGW_HAS_SECURE_API", 1)])
+    env.Append(CPPDEFINES=["MINGW_ENABLED"])
+    if env["target_win_version"] != "0x0501":
+        env.Append(CPPDEFINES=[("MINGW_HAS_SECURE_API", 1)])
 
     # resrc
     env.Append(BUILDERS={"RES": env.Builder(action=build_res_file, suffix=".o", src_suffix=".rc")})
