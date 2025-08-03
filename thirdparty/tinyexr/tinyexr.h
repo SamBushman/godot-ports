@@ -8018,7 +8018,7 @@ int SaveEXRImageToFile(const EXRImage *exr_image, const EXRHeader *exr_header,
 
   FILE *fp = NULL;
 #ifdef _WIN32
-#if defined(_MSC_VER) || (defined(MINGW_HAS_SECURE_API) && MINGW_HAS_SECURE_API) // MSVC, MinGW GCC, or Clang
+#if defined(_MSC_VER) // MSVC, MinGW GCC, or Clang
   errno_t errcode =
       _wfopen_s(&fp, tinyexr::UTF8ToWchar(filename).c_str(), L"wb");
   if (errcode != 0) {
@@ -8088,7 +8088,7 @@ int SaveEXRMultipartImageToFile(const EXRImage* exr_images,
 
   FILE *fp = NULL;
 #ifdef _WIN32
-#if defined(_MSC_VER) || (defined(MINGW_HAS_SECURE_API) && MINGW_HAS_SECURE_API) // MSVC, MinGW GCC, or Clang.
+#if defined(_MSC_VER) // MSVC, MinGW GCC, or Clang.
   errno_t errcode =
     _wfopen_s(&fp, tinyexr::UTF8ToWchar(filename).c_str(), L"wb");
   if (errcode != 0) {
@@ -8824,7 +8824,7 @@ int ParseEXRVersionFromFile(EXRVersion *version, const char *filename) {
 
   FILE *fp = NULL;
 #ifdef _WIN32
-#if defined(_MSC_VER) || (defined(MINGW_HAS_SECURE_API) && MINGW_HAS_SECURE_API) // MSVC, MinGW GCC, or Clang.
+#if defined(_MSC_VER) // MSVC, MinGW GCC, or Clang.
   errno_t err = _wfopen_s(&fp, tinyexr::UTF8ToWchar(filename).c_str(), L"rb");
   if (err != 0) {
     // TODO(syoyo): return wfopen_s erro code
