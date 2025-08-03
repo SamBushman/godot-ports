@@ -430,7 +430,13 @@ def configure_mingw(env):
 
     env.Append(CCFLAGS=["-mwindows"])
     env.Append(LINKFLAGS=["-Wl,--nxcompat"])  # DEP protection. Not enabling ASLR for now, Mono crashes.
-    env.Append(CPPDEFINES=["WINDOWS_ENABLED", "OPENGL_ENABLED", "WASAPI_ENABLED", "WINMIDI_ENABLED"])
+    env.Append(CPPDEFINES=["WINDOWS_ENABLED", "OPENGL_ENABLED", "WINMIDI_ENABLED"])
+
+    if env["target_win_version"] != "0x0501":
+        env.Append(CPPDEFINES=["WASAPI_ENABLED"])
+    else:
+        env.Append(CPPDEFINES=["DSOUND_ENABLED"])
+
     env.Append(CPPDEFINES=[("WINVER", env["target_win_version"]), ("_WIN32_WINNT", env["target_win_version"])])
     env.Append(
         LIBS=[

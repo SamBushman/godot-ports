@@ -1,0 +1,12 @@
+#!/usr/bin/env python
+
+Import("env")
+
+if env["platform"] == "windows":
+    env_dsound = env.Clone()
+    
+    # Add DirectSound library
+    env_dsound.Append(LIBS=["dsound", "dxguid"])
+    
+    # DirectSound driver source
+    env_dsound.add_source_files(env.drivers_sources, "*.cpp")
