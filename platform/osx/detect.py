@@ -152,6 +152,7 @@ def configure(env):
 
     else:  # osxcross build
         root = os.environ.get("OSXCROSS_ROOT", 0)
+        basecmd = ""
         if env["arch"] == "arm64":
             basecmd = root + "/target/bin/arm64-apple-" + env["osxcross_sdk"] + "-"
         elif env["arch"] == "ppc":
