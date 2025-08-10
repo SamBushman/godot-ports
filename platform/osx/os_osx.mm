@@ -2992,11 +2992,20 @@ void OS_OSX::set_window_fullscreen(bool p_enabled) {
 		if (layered_window)
 			set_window_per_pixel_transparency_enabled(false);
 		if (!resizable)
+#ifdef MAC_OS_X_10_6_FEATURES
 			[window_object setStyleMask:[window_object styleMask] | NSWindowStyleMaskResizable];
+#endif
 		if (p_enabled) {
+#if (!MAC_OS_X_10_6_FEATURES) && (MAC_OS_X_10_5_FEATURES)
+			[window_view enterFullScreenMode:[NSScreen mainScreen] withOptions:nil];
+#endif
 			[window_object setContentMinSize:NSMakeSize(0, 0)];
 			[window_object setContentMaxSize:NSMakeSize(FLT_MAX, FLT_MAX)];
 		} else {
+#if (!MAC_OS_X_10_6_FEATURES) && (MAC_OS_X_10_5_FEATURES)
+            [window_view exitFullScreenModeWithOptions:nil];
+			[window_object makeFirstResponder:window_view];
+#endif
 			if (min_size != Size2()) {
 				Size2 size = min_size / get_screen_max_scale();
 				[window_object setContentMinSize:NSMakeSize(size.x, size.y)];
