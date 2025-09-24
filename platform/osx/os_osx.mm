@@ -2303,27 +2303,23 @@ bool OS_OSX::is_mouse_grab_enabled() const {
 }
 
 void OS_OSX::warp_mouse_position(const Point2 &p_to) {
-	//copied from windows impl with osx native calls
 	if (mouse_mode == MOUSE_MODE_CAPTURED) {
 		mouse_x = p_to.x;
 		mouse_y = p_to.y;
 	} else { //set OS position
-
-		//local point in window coords
 		const NSRect contentRect = [window_view frame];
 		float displayScale = get_screen_max_scale();
-		NSRect pointInWindowRect = NSMakeRect(p_to.x / displayScale, contentRect.size.height - (p_to.y / displayScale) - 1, 0, 0);
-		
+
+		NSPoint pointInView = NSMakePoint(p_to.x / displayScale, contentRect.size.height - (p_to.y / displayScale));
+
 		NSRect windowFrame = [[window_view window] frame];
-		NSPoint pointOnScreen;
-		pointOnScreen.x = windowFrame.origin.x + pointInWindowRect.origin.x;
-		pointOnScreen.y = windowFrame.origin.y + pointInWindowRect.origin.y + (windowFrame.size.height - 	contentRect.size.height);
+		NSPoint pointOnScreenBottomOrigin = [window_view convertPoint:pointInView toView:nil];
+		pointOnScreenBottomOrigin.x += windowFrame.origin.x;
+		pointOnScreenBottomOrigin.y += windowFrame.origin.y;
 
+		CGFloat screenHeight = CGDisplayBounds(CGMainDisplayID()).size.height;
+		CGPoint lMouseWarpPos = CGPointMake(pointOnScreenBottomOrigin.x, screenHeight - pointOnScreenBottomOrigin.y);
 
-		//point in scren coords
-		CGPoint lMouseWarpPos = { pointOnScreen.x, CGDisplayBounds(CGMainDisplayID()).size.height - pointOnScreen.y };
-
-		//do the warping
 		CGEventSourceRef lEventRef = CGEventSourceCreate(kCGEventSourceStateCombinedSessionState);
 		CGEventSourceSetLocalEventsSuppressionInterval(lEventRef, 0.0);
 		CGAssociateMouseAndMouseCursorPosition(false);
@@ -2331,6 +2327,7 @@ void OS_OSX::warp_mouse_position(const Point2 &p_to) {
 		if (mouse_mode != MOUSE_MODE_CONFINED && mouse_mode != MOUSE_MODE_CONFINED_HIDDEN) {
 			CGAssociateMouseAndMouseCursorPosition(true);
 		}
+		CFRelease(lEventRef);
 	}
 }
 
