@@ -30,6 +30,14 @@
 
 #include "os_osx.h"
 
+// CGFloat was introduced in the Mac OS X 10.5 SDK; Tiger's (10.4) SDK
+// headers don't define it at all. Godot ppc/Tiger only ever builds
+// 32-bit, matching the 10.5+ SDK's own 32-bit CGFloat definition.
+#ifndef CGFLOAT_DEFINED
+typedef float CGFloat;
+#define CGFLOAT_DEFINED 1
+#endif
+
 #include "core/math/geometry.h"
 #include "core/os/keyboard.h"
 #include "core/print_string.h"
