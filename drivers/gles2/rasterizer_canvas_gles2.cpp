@@ -53,7 +53,7 @@ void RasterizerCanvasGLES2::_batch_upload_buffers() {
 		return;
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
 
 	// usage flag is a project setting
 	GLenum buffer_usage_flag = GL_DYNAMIC_DRAW;
@@ -63,31 +63,36 @@ void RasterizerCanvasGLES2::_batch_upload_buffers() {
 
 	// orphan the old (for now)
 	if (bdata.buffer_mode_batch_upload_send_null) {
-		glBufferData(GL_ARRAY_BUFFER, 0, nullptr, buffer_usage_flag); // GL_DYNAMIC_DRAW);
+		storage->buffer_orphan_and_upload(0, 0, 0, nullptr, GL_ARRAY_BUFFER, buffer_usage_flag, false);
 	}
 
 	switch (bdata.fvf) {
 		case RasterizerStorageCommon::FVF_UNBATCHED: // should not happen
 			break;
-		case RasterizerStorageCommon::FVF_REGULAR: // no change
-			glBufferData(GL_ARRAY_BUFFER, sizeof(BatchVertex) * bdata.vertices.size(), bdata.vertices.get_data(), buffer_usage_flag);
-			break;
-		case RasterizerStorageCommon::FVF_COLOR:
-			glBufferData(GL_ARRAY_BUFFER, sizeof(BatchVertexColored) * bdata.unit_vertices.size(), bdata.unit_vertices.get_unit(0), buffer_usage_flag);
-			break;
-		case RasterizerStorageCommon::FVF_LIGHT_ANGLE:
-			glBufferData(GL_ARRAY_BUFFER, sizeof(BatchVertexLightAngled) * bdata.unit_vertices.size(), bdata.unit_vertices.get_unit(0), buffer_usage_flag);
-			break;
-		case RasterizerStorageCommon::FVF_MODULATED:
-			glBufferData(GL_ARRAY_BUFFER, sizeof(BatchVertexModulated) * bdata.unit_vertices.size(), bdata.unit_vertices.get_unit(0), buffer_usage_flag);
-			break;
-		case RasterizerStorageCommon::FVF_LARGE:
-			glBufferData(GL_ARRAY_BUFFER, sizeof(BatchVertexLarge) * bdata.unit_vertices.size(), bdata.unit_vertices.get_unit(0), buffer_usage_flag);
-			break;
+		case RasterizerStorageCommon::FVF_REGULAR: { // no change
+			unsigned int sz = sizeof(BatchVertex) * bdata.vertices.size();
+			storage->buffer_orphan_and_upload(sz, 0, sz, bdata.vertices.get_data(), GL_ARRAY_BUFFER, buffer_usage_flag, false);
+		} break;
+		case RasterizerStorageCommon::FVF_COLOR: {
+			unsigned int sz = sizeof(BatchVertexColored) * bdata.unit_vertices.size();
+			storage->buffer_orphan_and_upload(sz, 0, sz, bdata.unit_vertices.get_unit(0), GL_ARRAY_BUFFER, buffer_usage_flag, false);
+		} break;
+		case RasterizerStorageCommon::FVF_LIGHT_ANGLE: {
+			unsigned int sz = sizeof(BatchVertexLightAngled) * bdata.unit_vertices.size();
+			storage->buffer_orphan_and_upload(sz, 0, sz, bdata.unit_vertices.get_unit(0), GL_ARRAY_BUFFER, buffer_usage_flag, false);
+		} break;
+		case RasterizerStorageCommon::FVF_MODULATED: {
+			unsigned int sz = sizeof(BatchVertexModulated) * bdata.unit_vertices.size();
+			storage->buffer_orphan_and_upload(sz, 0, sz, bdata.unit_vertices.get_unit(0), GL_ARRAY_BUFFER, buffer_usage_flag, false);
+		} break;
+		case RasterizerStorageCommon::FVF_LARGE: {
+			unsigned int sz = sizeof(BatchVertexLarge) * bdata.unit_vertices.size();
+			storage->buffer_orphan_and_upload(sz, 0, sz, bdata.unit_vertices.get_unit(0), GL_ARRAY_BUFFER, buffer_usage_flag, false);
+		} break;
 	}
 
 	// might not be necessary
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
 }
 
 void RasterizerCanvasGLES2::_batch_render_lines(const Batch &p_batch, RasterizerStorageGLES2::Material *p_material, bool p_anti_alias) {
@@ -100,8 +105,9 @@ void RasterizerCanvasGLES2::_batch_render_lines(const Batch &p_batch, Rasterizer
 
 	_bind_canvas_texture(RID(), RID());
 
-	glDisableVertexAttribArray(VS::ARRAY_COLOR);
-	glVertexAttrib4fv(VS::ARRAY_COLOR, (float *)&p_batch.color);
+	int num_elements = p_batch.num_commands * 2;
+
+	_bind_constant_vertex_attrib(VS::ARRAY_COLOR, 4, (const float *)&p_batch.color, num_elements);
 
 #ifdef GLES_OVER_GL
 	if (p_anti_alias) {
@@ -112,24 +118,29 @@ void RasterizerCanvasGLES2::_batch_render_lines(const Batch &p_batch, Rasterizer
 	int sizeof_vert = sizeof(BatchVertex);
 
 	// bind the index and vertex buffer
-	glBindBuffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bdata.gl_index_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, bdata.gl_index_buffer);
 
-	uint64_t pointer = 0;
-	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof_vert, (const void *)pointer);
+	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof_vert, (void *)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER));
 
-	glDisableVertexAttribArray(VS::ARRAY_TEX_UV);
+	{
+		static const float zero_uv[2] = { 0.0f, 0.0f };
+		_bind_constant_vertex_attrib(VS::ARRAY_TEX_UV, 2, zero_uv, num_elements);
+	}
+
+	// re-bind the vertex buffer -- the ARRAY_TEX_UV constant-fill call
+	// above rebinds GL_ARRAY_BUFFER to its own scratch buffer internally.
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
 
 	int64_t offset = p_batch.first_vert; // 6 inds per quad at 2 bytes each
 
-	int num_elements = p_batch.num_commands * 2;
 	glDrawArrays(GL_LINES, offset, num_elements);
 
 	storage->info.render._2d_draw_call_count++;
 
 	// may not be necessary .. state change optimization still TODO
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
 #ifdef GLES_OVER_GL
 	if (p_anti_alias) {
@@ -193,10 +204,10 @@ void RasterizerCanvasGLES2::_batch_render_generic(const Batch &p_batch, Rasteriz
 	_bind_canvas_texture(tex.RID_texture, tex.RID_normal);
 
 	// bind the index and vertex buffer
-	glBindBuffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bdata.gl_index_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, bdata.gl_index_buffer);
 
-	uint64_t pointer = 0;
+	uint64_t pointer = (uint64_t)(uintptr_t)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER);
 	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof_vert, (const void *)pointer);
 
 	// always send UVs, even within a texture specified because a shader can still use UVs
@@ -205,8 +216,16 @@ void RasterizerCanvasGLES2::_batch_render_generic(const Batch &p_batch, Rasteriz
 
 	// color
 	if (!colored_verts) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttrib4fv(VS::ARRAY_COLOR, p_batch.color.get_data());
+		// Safe upper bound on the vertex indices this draw could possibly
+		// reference: the batch's full currently-uploaded vertex count
+		// (this draw covers some sub-range of it, addressed by
+		// p_batch.first_vert/num_commands, but any index within the full
+		// upload is guaranteed in range).
+		int total_batch_verts = (bdata.fvf == RasterizerStorageCommon::FVF_REGULAR) ? bdata.vertices.size() : bdata.unit_vertices.size();
+		_bind_constant_vertex_attrib(VS::ARRAY_COLOR, 4, p_batch.color.get_data(), total_batch_verts);
+		// re-bind the vertex buffer -- the call above rebinds
+		// GL_ARRAY_BUFFER to its own scratch buffer internally.
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
 	} else {
 		glEnableVertexAttribArray(VS::ARRAY_COLOR);
 		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof_vert, CAST_INT_TO_UCHAR_PTR(pointer + (4 * 4)));
@@ -257,7 +276,7 @@ void RasterizerCanvasGLES2::_batch_render_generic(const Batch &p_batch, Rasteriz
 			int64_t offset = p_batch.first_vert * 3;
 
 			int num_elements = p_batch.num_commands * 6;
-			glDrawElements(GL_TRIANGLES, num_elements, GL_UNSIGNED_SHORT, (void *)offset);
+			glDrawElements(GL_TRIANGLES, num_elements, GL_UNSIGNED_SHORT, (void *)((uint8_t *)storage->gl_get_buffer_draw_ptr(GL_ELEMENT_ARRAY_BUFFER) + offset));
 		} break;
 		case RasterizerStorageCommon::BT_POLY: {
 			int64_t offset = p_batch.first_vert;
@@ -293,8 +312,8 @@ void RasterizerCanvasGLES2::_batch_render_generic(const Batch &p_batch, Rasteriz
 	glDisableVertexAttribArray(VS::ARRAY_WEIGHTS);
 
 	// may not be necessary .. state change optimization still TODO
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip, RasterizerStorageGLES2::Material *p_material) {
@@ -338,8 +357,12 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 
 							_bind_canvas_texture(RID(), RID());
 
-							glDisableVertexAttribArray(VS::ARRAY_COLOR);
-							glVertexAttrib4fv(VS::ARRAY_COLOR, line->color.components);
+							// _draw_gui_primitive() now always requires a
+							// real per-vertex color array (see its
+							// comment) rather than reading an ambient
+							// glVertexAttrib4fv() value, so build one here
+							// instead.
+							const Color line_colors[4] = { line->color, line->color, line->color, line->color };
 
 							state.canvas_shader.set_uniform(CanvasShaderGLES2::MODELVIEW_MATRIX, state.uniforms.modelview_matrix);
 
@@ -354,7 +377,7 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 									glEnable(GL_LINE_SMOOTH);
 								}
 #endif
-								_draw_gui_primitive(2, verts, nullptr, nullptr);
+								_draw_gui_primitive(2, verts, line_colors, nullptr);
 
 #ifdef GLES_OVER_GL
 								if (line->antialiased) {
@@ -371,7 +394,7 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 									line->to - t
 								};
 
-								_draw_gui_primitive(4, verts, nullptr, nullptr);
+								_draw_gui_primitive(4, verts, line_colors, nullptr);
 #ifdef GLES_OVER_GL
 								if (line->antialiased) {
 									glEnable(GL_LINE_SMOOTH);
@@ -380,7 +403,7 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 											verts[j],
 											verts[(j + 1) % 4],
 										};
-										_draw_gui_primitive(2, vertsl, nullptr, nullptr);
+										_draw_gui_primitive(2, vertsl, line_colors, nullptr);
 									}
 									glDisable(GL_LINE_SMOOTH);
 								}
@@ -391,8 +414,11 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 						case Item::Command::TYPE_RECT: {
 							Item::CommandRect *r = static_cast<Item::CommandRect *>(command);
 
-							glDisableVertexAttribArray(VS::ARRAY_COLOR);
-							glVertexAttrib4fv(VS::ARRAY_COLOR, r->modulate.components);
+							// Real color array for the below -- see the
+							// comment on _draw_gui_primitive()/
+							// _bind_constant_vertex_attrib() for why this
+							// replaces the old ambient glVertexAttrib4fv().
+							const Color rect_colors[4] = { r->modulate, r->modulate, r->modulate, r->modulate };
 
 							bool can_tile = true;
 							if (r->texture.is_valid() && r->flags & CANVAS_RECT_TILE && !storage->config.support_npot_repeat_mipmap) {
@@ -517,9 +543,9 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 										// this has the benefit of enabling batching with light angles.
 										float light_angles[4] = { angle, angle, angle, angle };
 
-										_draw_gui_primitive(4, points, nullptr, uvs, light_angles);
+										_draw_gui_primitive(4, points, rect_colors, uvs, light_angles);
 									} else {
-										_draw_gui_primitive(4, points, nullptr, uvs);
+										_draw_gui_primitive(4, points, rect_colors, uvs);
 									}
 
 									if (untile) {
@@ -535,12 +561,16 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 									};
 
 									state.canvas_shader.set_uniform(CanvasShaderGLES2::COLOR_TEXPIXEL_SIZE, Vector2());
-									_draw_gui_primitive(4, points, nullptr, uvs);
+									_draw_gui_primitive(4, points, rect_colors, uvs);
 								}
 
 							} else {
 								// This branch is better for performance, but can produce flicker on Nvidia, see above comment.
 								_bind_quad_buffer();
+								// _bind_quad_buffer() sets ARRAY_COLOR to a
+								// default white -- override with the real
+								// per-rect modulate/tint color.
+								_bind_constant_vertex_attrib(VS::ARRAY_COLOR, 4, r->modulate.components, 4);
 
 								_set_texture_rect_mode(true);
 
@@ -634,8 +664,9 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 								state.canvas_shader.use_material((void *)p_material);
 							}
 
-							glDisableVertexAttribArray(VS::ARRAY_COLOR);
-							glVertexAttrib4fv(VS::ARRAY_COLOR, np->color.components);
+							// NinePatch is a 4x4 grid of vertices -- see the
+							// "buffer" fill below.
+							_bind_constant_vertex_attrib(VS::ARRAY_COLOR, 4, np->color.components, 16);
 
 							RasterizerStorageGLES2::Texture *tex = _bind_canvas_texture(np->texture, np->normal_map);
 
@@ -779,21 +810,24 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 								buffer[(3 * 4 * 4) + 15] = (source.position.y + source.size.y) * texpixel_size.y;
 							}
 
-							glBindBuffer(GL_ARRAY_BUFFER, data.ninepatch_vertices);
-							glBufferData(GL_ARRAY_BUFFER, sizeof(float) * (16 + 16) * 2, buffer, _buffer_upload_usage_flag);
+							storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.ninepatch_vertices);
+							storage->buffer_orphan_and_upload(sizeof(float) * (16 + 16) * 2, 0, sizeof(float) * (16 + 16) * 2, buffer, GL_ARRAY_BUFFER, _buffer_upload_usage_flag);
 
-							glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ninepatch_elements);
+							storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, data.ninepatch_elements);
 
 							glEnableVertexAttribArray(VS::ARRAY_VERTEX);
 							glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
 
-							glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), nullptr);
-							glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), CAST_INT_TO_UCHAR_PTR((sizeof(float) * 2)));
+							{
+								const uint8_t *vptr = (const uint8_t *)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER);
+								glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vptr);
+								glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), vptr + (sizeof(float) * 2));
+							}
 
-							glDrawElements(GL_TRIANGLES, 18 * 3 - (np->draw_center ? 0 : 6), GL_UNSIGNED_BYTE, nullptr);
+							glDrawElements(GL_TRIANGLES, 18 * 3 - (np->draw_center ? 0 : 6), GL_UNSIGNED_BYTE, (void *)storage->gl_get_buffer_draw_ptr(GL_ELEMENT_ARRAY_BUFFER));
 
-							glBindBuffer(GL_ARRAY_BUFFER, 0);
-							glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+							storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+							storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 							storage->info.render._2d_draw_call_count++;
 
 						} break;
@@ -1123,15 +1157,21 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 								state.canvas_shader.set_uniform(CanvasShaderGLES2::COLOR_TEXPIXEL_SIZE, texpixel_size);
 							}
 
-							// we need a temporary because this must be nulled out
-							// if only a single color specified
+							// we need a temporary because this must be
+							// pointed at a real repeated-color array if
+							// only a single color was specified --
+							// _draw_gui_primitive() requires a real
+							// per-vertex color array (or nullptr, which it
+							// defaults to white), not an ambient
+							// glVertexAttrib4f() value.
 							const Color *colors = primitive->colors.ptr();
+							Color single_color_fill[4];
 							if (primitive->colors.size() == 1 && primitive->points.size() > 1) {
 								Color c = primitive->colors[0];
-								glVertexAttrib4f(VS::ARRAY_COLOR, c.r, c.g, c.b, c.a);
-								colors = nullptr;
-							} else if (primitive->colors.empty()) {
-								glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
+								for (int fi = 0; fi < 4; fi++) {
+									single_color_fill[fi] = c;
+								}
+								colors = single_color_fill;
 							}
 #ifdef RASTERIZER_EXTRA_CHECKS
 							else {
@@ -2358,13 +2398,13 @@ void RasterizerCanvasGLES2::initialize() {
 	glGenBuffers(1, (GLuint*)&bdata.gl_vertex_buffer);
 
 	if (bdata.vertex_buffer_size_bytes) {
-		glBindBuffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
-		glBufferData(GL_ARRAY_BUFFER, bdata.vertex_buffer_size_bytes, nullptr, GL_DYNAMIC_DRAW);
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, bdata.gl_vertex_buffer);
+		storage->buffer_orphan_and_upload(bdata.vertex_buffer_size_bytes, 0, 0, nullptr, GL_ARRAY_BUFFER, GL_DYNAMIC_DRAW);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
 
 		// pre fill index buffer, the indices never need to change so can be static
 		glGenBuffers(1, (GLuint*)&bdata.gl_index_buffer);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, bdata.gl_index_buffer);
+		storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, bdata.gl_index_buffer);
 
 		Vector<uint16_t> indices;
 		indices.resize(bdata.index_buffer_size_units);
@@ -2385,8 +2425,8 @@ void RasterizerCanvasGLES2::initialize() {
 #endif
 		}
 
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, bdata.index_buffer_size_bytes, &indices[0], GL_STATIC_DRAW);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		storage->buffer_orphan_and_upload(bdata.index_buffer_size_bytes, 0, bdata.index_buffer_size_bytes, &indices[0], GL_ELEMENT_ARRAY_BUFFER, GL_STATIC_DRAW);
+		storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
 	} // only if there is a vertex buffer (batching is on)
 	RasterizerGLES2::gl_check_errors();

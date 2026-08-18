@@ -103,8 +103,10 @@ void RasterizerCanvasBaseGLES2::canvas_begin() {
 	WRAPPED_GL_ACTIVE_TEXTURE(GL_TEXTURE0);
 	glBindTexture(GL_TEXTURE_2D, storage->resources.white_tex);
 
-	glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
-	glDisableVertexAttribArray(VS::ARRAY_COLOR);
+	// ARRAY_COLOR's default/baseline state is set up by _bind_quad_buffer()
+	// below (real array-fed white, not disabled -- see its comment) rather
+	// than here, since this port's target driver corrupts the framebuffer
+	// when a disabled attribute is written into a varying.
 
 	// set up default uniforms
 
@@ -323,9 +325,25 @@ void RasterizerCanvasBaseGLES2::draw_window_margins(int *black_margin, RID *blac
 }
 
 void RasterizerCanvasBaseGLES2::_bind_quad_buffer() {
-	glBindBuffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
 	glEnableVertexAttribArray(VS::ARRAY_VERTEX);
-	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, 0, nullptr);
+	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, 0, (void *)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER));
+
+	// Real array-fed white color for the quad's 4 vertices, matching
+	// canvas_quad_vertices vertex-for-vertex -- kept enabled (not
+	// glVertexAttrib4f-disabled) because this port's target driver
+	// corrupts the framebuffer when a disabled attribute is written into
+	// a varying, and canvas.glsl unconditionally does
+	// color_interp = color_attrib regardless of draw mode. Callers of
+	// this function (canvas_begin(), draw_lens_distortion_rect(), and the
+	// textured-rect fast path in rasterizer_canvas_gles2.cpp) all draw
+	// exactly these same 4 vertices, so a matching 4-entry buffer is
+	// always correct for them.
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.canvas_quad_colors_white);
+	glEnableVertexAttribArray(VS::ARRAY_COLOR);
+	glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, 0, (void *)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER));
+
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
 }
 
 void RasterizerCanvasBaseGLES2::_set_uniforms() {
@@ -427,7 +445,14 @@ void RasterizerCanvasBaseGLES2::_copy_texscreen(const Rect2 &p_rect) {
 }
 
 void RasterizerCanvasBaseGLES2::_draw_polygon(const int *p_indices, int p_index_count, int p_vertex_count, const Vector2 *p_vertices, const Vector2 *p_uvs, const Color *p_colors, bool p_singlecolor, const float *p_weights, const int *p_bones) {
-	glBindBuffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	// See rasterizer_storage_gles2.h: on ppc, gl_get_buffer_draw_ptr() returns
+	// the real CPU-side staging pointer instead of a VBO-relative offset;
+	// elsewhere it's nullptr, so this is exactly the buffer_ofs the code
+	// already used and behaves identically to before.
+	auto arr_ptr = [&](uint32_t p_off) -> void * {
+		return (uint8_t *)((uintptr_t)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER) + p_off);
+	};
 
 	uint32_t buffer_ofs = 0;
 	uint32_t buffer_ofs_after = buffer_ofs + (sizeof(Vector2) * p_vertex_count);
@@ -438,41 +463,60 @@ void RasterizerCanvasBaseGLES2::_draw_polygon(const int *p_indices, int p_index_
 	storage->buffer_orphan_and_upload(data.polygon_buffer_size, 0, sizeof(Vector2) * p_vertex_count, p_vertices, GL_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
 
 	glEnableVertexAttribArray(VS::ARRAY_VERTEX);
-	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), nullptr);
+	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(0));
 	buffer_ofs = buffer_ofs_after;
 
-	if (p_singlecolor) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		Color m = *p_colors;
-		glVertexAttrib4f(VS::ARRAY_COLOR, m.r, m.g, m.b, m.a);
-	} else if (!p_colors) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
+	// On some drivers (e.g. the ATI Radeon X1900 / Mac OS X 10.4 Tiger GL
+	// driver this port targets), writing a DISABLED vertex attribute --
+	// one fed via glVertexAttrib* instead of a real per-vertex array --
+	// into a varying corrupts the framebuffer. canvas.glsl unconditionally
+	// does color_interp = color_attrib and uv_interp = uv_attrib, so a
+	// flat-color or UV-less draw using glDisableVertexAttribArray here
+	// would trip that bug. Always feed ARRAY_COLOR/ARRAY_TEX_UV from a
+	// real per-vertex array (filled with the constant value when there's
+	// no real per-vertex data) instead of disabling them.
+	if (p_singlecolor || !p_colors) {
+		Color m = p_singlecolor ? *p_colors : Color(1, 1, 1, 1);
+		Color *color_fill = (Color *)alloca(sizeof(Color) * p_vertex_count);
+		for (int i = 0; i < p_vertex_count; i++) {
+			color_fill[i] = m;
+		}
+		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Color) * p_vertex_count, color_fill, buffer_ofs_after));
+		glEnableVertexAttribArray(VS::ARRAY_COLOR);
+		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), arr_ptr(buffer_ofs));
+		buffer_ofs = buffer_ofs_after;
 	} else {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Color) * p_vertex_count, p_colors, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 	}
 
 	if (p_uvs) {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Vector2) * p_vertex_count, p_uvs, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
-		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 	} else {
-		glDisableVertexAttribArray(VS::ARRAY_TEX_UV);
+		Vector2 *uv_fill = (Vector2 *)alloca(sizeof(Vector2) * p_vertex_count);
+		for (int i = 0; i < p_vertex_count; i++) {
+			uv_fill[i] = Vector2();
+		}
+		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Vector2) * p_vertex_count, uv_fill, buffer_ofs_after));
+		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
+		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(buffer_ofs));
+		buffer_ofs = buffer_ofs_after;
 	}
 
 	if (p_weights && p_bones) {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(float) * 4 * p_vertex_count, p_weights, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_WEIGHTS);
-		glVertexAttribPointer(VS::ARRAY_WEIGHTS, 4, GL_FLOAT, GL_FALSE, sizeof(float) * 4, CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_WEIGHTS, 4, GL_FLOAT, GL_FALSE, sizeof(float) * 4, arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(int) * 4 * p_vertex_count, p_bones, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_BONES);
-		glVertexAttribPointer(VS::ARRAY_BONES, 4, GL_UNSIGNED_INT, GL_FALSE, sizeof(int) * 4, CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_BONES, 4, GL_UNSIGNED_INT, GL_FALSE, sizeof(int) * 4, arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 
 	} else {
@@ -480,14 +524,17 @@ void RasterizerCanvasBaseGLES2::_draw_polygon(const int *p_indices, int p_index_
 		glDisableVertexAttribArray(VS::ARRAY_BONES);
 	}
 
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.polygon_index_buffer);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, data.polygon_index_buffer);
+	auto idx_ptr = [&]() -> void * {
+		return (void *)storage->gl_get_buffer_draw_ptr(GL_ELEMENT_ARRAY_BUFFER);
+	};
 
 	if (storage->config.support_32_bits_indices) { //should check for
 #ifdef DEBUG_ENABLED
 		ERR_FAIL_COND((sizeof(int) * p_index_count) > data.polygon_index_buffer_size);
 #endif
 		storage->buffer_orphan_and_upload(data.polygon_index_buffer_size, 0, sizeof(int) * p_index_count, p_indices, GL_ELEMENT_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
-		glDrawElements(GL_TRIANGLES, p_index_count, GL_UNSIGNED_INT, nullptr);
+		glDrawElements(GL_TRIANGLES, p_index_count, GL_UNSIGNED_INT, idx_ptr());
 		storage->info.render._2d_draw_call_count++;
 	} else {
 #ifdef DEBUG_ENABLED
@@ -498,16 +545,19 @@ void RasterizerCanvasBaseGLES2::_draw_polygon(const int *p_indices, int p_index_
 			index16[i] = uint16_t(p_indices[i]);
 		}
 		storage->buffer_orphan_and_upload(data.polygon_index_buffer_size, 0, sizeof(uint16_t) * p_index_count, index16, GL_ELEMENT_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
-		glDrawElements(GL_TRIANGLES, p_index_count, GL_UNSIGNED_SHORT, nullptr);
+		glDrawElements(GL_TRIANGLES, p_index_count, GL_UNSIGNED_SHORT, idx_ptr());
 		storage->info.render._2d_draw_call_count++;
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 void RasterizerCanvasBaseGLES2::_draw_generic(GLuint p_primitive, int p_vertex_count, const Vector2 *p_vertices, const Vector2 *p_uvs, const Color *p_colors, bool p_singlecolor) {
-	glBindBuffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	auto arr_ptr = [&](uint32_t p_off) -> void * {
+		return (uint8_t *)((uintptr_t)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER) + p_off);
+	};
 
 	uint32_t buffer_ofs = 0;
 	uint32_t buffer_ofs_after = buffer_ofs + (sizeof(Vector2) * p_vertex_count);
@@ -517,40 +567,57 @@ void RasterizerCanvasBaseGLES2::_draw_generic(GLuint p_primitive, int p_vertex_c
 	storage->buffer_orphan_and_upload(data.polygon_buffer_size, 0, sizeof(Vector2) * p_vertex_count, p_vertices, GL_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
 
 	glEnableVertexAttribArray(VS::ARRAY_VERTEX);
-	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), nullptr);
+	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(0));
 	buffer_ofs = buffer_ofs_after;
 
-	if (p_singlecolor) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		Color m = *p_colors;
-		glVertexAttrib4f(VS::ARRAY_COLOR, m.r, m.g, m.b, m.a);
-	} else if (!p_colors) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
+	// Same fix as _draw_polygon() above: never disable ARRAY_COLOR /
+	// ARRAY_TEX_UV for flat-color / UV-less draws -- feed them from a
+	// real per-vertex array instead, to avoid the disabled-attribute-
+	// into-varying framebuffer corruption on this port's target driver.
+	if (p_singlecolor || !p_colors) {
+		Color m = p_singlecolor ? *p_colors : Color(1, 1, 1, 1);
+		Color *color_fill = (Color *)alloca(sizeof(Color) * p_vertex_count);
+		for (int i = 0; i < p_vertex_count; i++) {
+			color_fill[i] = m;
+		}
+		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Color) * p_vertex_count, color_fill, buffer_ofs_after));
+		glEnableVertexAttribArray(VS::ARRAY_COLOR);
+		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), arr_ptr(buffer_ofs));
+		buffer_ofs = buffer_ofs_after;
 	} else {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Color) * p_vertex_count, p_colors, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 	}
 
 	if (p_uvs) {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Vector2) * p_vertex_count, p_uvs, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
-		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 	} else {
-		glDisableVertexAttribArray(VS::ARRAY_TEX_UV);
+		Vector2 *uv_fill = (Vector2 *)alloca(sizeof(Vector2) * p_vertex_count);
+		for (int i = 0; i < p_vertex_count; i++) {
+			uv_fill[i] = Vector2();
+		}
+		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Vector2) * p_vertex_count, uv_fill, buffer_ofs_after));
+		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
+		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(buffer_ofs));
+		buffer_ofs = buffer_ofs_after;
 	}
 
 	glDrawArrays(p_primitive, 0, p_vertex_count);
 	storage->info.render._2d_draw_call_count++;
 
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
 }
 
 void RasterizerCanvasBaseGLES2::_draw_generic_indices(GLuint p_primitive, const int *p_indices, int p_index_count, int p_vertex_count, const Vector2 *p_vertices, const Vector2 *p_uvs, const Color *p_colors, bool p_singlecolor) {
-	glBindBuffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	auto arr_ptr = [&](uint32_t p_off) -> void * {
+		return (uint8_t *)((uintptr_t)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER) + p_off);
+	};
 
 	uint32_t buffer_ofs = 0;
 	uint32_t buffer_ofs_after = buffer_ofs + (sizeof(Vector2) * p_vertex_count);
@@ -560,30 +627,44 @@ void RasterizerCanvasBaseGLES2::_draw_generic_indices(GLuint p_primitive, const 
 	storage->buffer_orphan_and_upload(data.polygon_buffer_size, 0, sizeof(Vector2) * p_vertex_count, p_vertices, GL_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
 
 	glEnableVertexAttribArray(VS::ARRAY_VERTEX);
-	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), nullptr);
+	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(0));
 	buffer_ofs = buffer_ofs_after;
 
-	if (p_singlecolor) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		Color m = *p_colors;
-		glVertexAttrib4f(VS::ARRAY_COLOR, m.r, m.g, m.b, m.a);
-	} else if (!p_colors) {
-		glDisableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
+	// Same fix as _draw_polygon() above: never disable ARRAY_COLOR /
+	// ARRAY_TEX_UV for flat-color / UV-less draws -- feed them from a
+	// real per-vertex array instead, to avoid the disabled-attribute-
+	// into-varying framebuffer corruption on this port's target driver.
+	if (p_singlecolor || !p_colors) {
+		Color m = p_singlecolor ? *p_colors : Color(1, 1, 1, 1);
+		Color *color_fill = (Color *)alloca(sizeof(Color) * p_vertex_count);
+		for (int i = 0; i < p_vertex_count; i++) {
+			color_fill[i] = m;
+		}
+		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Color) * p_vertex_count, color_fill, buffer_ofs_after));
+		glEnableVertexAttribArray(VS::ARRAY_COLOR);
+		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), arr_ptr(buffer_ofs));
+		buffer_ofs = buffer_ofs_after;
 	} else {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Color) * p_vertex_count, p_colors, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_COLOR);
-		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, sizeof(Color), arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 	}
 
 	if (p_uvs) {
 		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Vector2) * p_vertex_count, p_uvs, buffer_ofs_after));
 		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
-		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), CAST_INT_TO_UCHAR_PTR(buffer_ofs));
+		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(buffer_ofs));
 		buffer_ofs = buffer_ofs_after;
 	} else {
-		glDisableVertexAttribArray(VS::ARRAY_TEX_UV);
+		Vector2 *uv_fill = (Vector2 *)alloca(sizeof(Vector2) * p_vertex_count);
+		for (int i = 0; i < p_vertex_count; i++) {
+			uv_fill[i] = Vector2();
+		}
+		RAST_FAIL_COND(!storage->safe_buffer_sub_data(data.polygon_buffer_size, GL_ARRAY_BUFFER, buffer_ofs, sizeof(Vector2) * p_vertex_count, uv_fill, buffer_ofs_after));
+		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
+		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, sizeof(Vector2), arr_ptr(buffer_ofs));
+		buffer_ofs = buffer_ofs_after;
 	}
 
 #ifdef RASTERIZER_EXTRA_CHECKS
@@ -593,14 +674,17 @@ void RasterizerCanvasBaseGLES2::_draw_generic_indices(GLuint p_primitive, const 
 	}
 #endif
 
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.polygon_index_buffer);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, data.polygon_index_buffer);
+	auto idx_ptr = [&]() -> void * {
+		return (void *)storage->gl_get_buffer_draw_ptr(GL_ELEMENT_ARRAY_BUFFER);
+	};
 
 	if (storage->config.support_32_bits_indices) { //should check for
 #ifdef DEBUG_ENABLED
 		ERR_FAIL_COND((sizeof(int) * p_index_count) > data.polygon_index_buffer_size);
 #endif
 		storage->buffer_orphan_and_upload(data.polygon_index_buffer_size, 0, sizeof(int) * p_index_count, p_indices, GL_ELEMENT_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
-		glDrawElements(p_primitive, p_index_count, GL_UNSIGNED_INT, nullptr);
+		glDrawElements(p_primitive, p_index_count, GL_UNSIGNED_INT, idx_ptr());
 		storage->info.render._2d_draw_call_count++;
 	} else {
 #ifdef DEBUG_ENABLED
@@ -611,34 +695,31 @@ void RasterizerCanvasBaseGLES2::_draw_generic_indices(GLuint p_primitive, const 
 			index16[i] = uint16_t(p_indices[i]);
 		}
 		storage->buffer_orphan_and_upload(data.polygon_index_buffer_size, 0, sizeof(uint16_t) * p_index_count, index16, GL_ELEMENT_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
-		glDrawElements(p_primitive, p_index_count, GL_UNSIGNED_SHORT, nullptr);
+		glDrawElements(p_primitive, p_index_count, GL_UNSIGNED_SHORT, idx_ptr());
 		storage->info.render._2d_draw_call_count++;
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
-	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 }
 
 void RasterizerCanvasBaseGLES2::_draw_gui_primitive(int p_points, const Vector2 *p_vertices, const Color *p_colors, const Vector2 *p_uvs, const float *p_light_angles) {
 	static const GLenum prim[5] = { GL_POINTS, GL_POINTS, GL_LINES, GL_TRIANGLES, GL_TRIANGLE_FAN };
 
-	int color_offset = 0;
-	int uv_offset = 0;
-	int light_angle_offset = 0;
-	int stride = 2;
-
-	if (p_colors) {
-		color_offset = stride;
-		stride += 4;
-	}
-
-	if (p_uvs) {
-		uv_offset = stride;
-		stride += 2;
-	}
+	// ARRAY_COLOR and ARRAY_TEX_UV are always reserved and always fed from
+	// a real per-vertex array below (filled with a constant when there's
+	// no real per-vertex data) rather than being left disabled / at
+	// whatever ambient state a previous draw left them in -- see the
+	// comment in _draw_polygon() above for why: this port's target driver
+	// corrupts the framebuffer when a disabled attribute is written into
+	// a varying, and canvas.glsl unconditionally does
+	// color_interp = color_attrib.
+	int color_offset = 2;
+	int uv_offset = color_offset + 4;
+	int light_angle_offset = uv_offset + 2;
+	int stride = uv_offset + 2;
 
 	if (p_light_angles) { //light_angles
-		light_angle_offset = stride;
 		stride += 1;
 	}
 
@@ -657,12 +738,24 @@ void RasterizerCanvasBaseGLES2::_draw_gui_primitive(int p_points, const Vector2 
 			buffer_data[stride * i + color_offset + 2] = p_colors[i].b;
 			buffer_data[stride * i + color_offset + 3] = p_colors[i].a;
 		}
+	} else {
+		for (int i = 0; i < p_points; i++) {
+			buffer_data[stride * i + color_offset + 0] = 1.0f;
+			buffer_data[stride * i + color_offset + 1] = 1.0f;
+			buffer_data[stride * i + color_offset + 2] = 1.0f;
+			buffer_data[stride * i + color_offset + 3] = 1.0f;
+		}
 	}
 
 	if (p_uvs) {
 		for (int i = 0; i < p_points; i++) {
 			buffer_data[stride * i + uv_offset + 0] = p_uvs[i].x;
 			buffer_data[stride * i + uv_offset + 1] = p_uvs[i].y;
+		}
+	} else {
+		for (int i = 0; i < p_points; i++) {
+			buffer_data[stride * i + uv_offset + 0] = 0.0f;
+			buffer_data[stride * i + uv_offset + 1] = 0.0f;
 		}
 	}
 
@@ -672,23 +765,22 @@ void RasterizerCanvasBaseGLES2::_draw_gui_primitive(int p_points, const Vector2 
 		}
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.polygon_buffer);
 	storage->buffer_orphan_and_upload(data.polygon_buffer_size, 0, p_points * stride * sizeof(float), buffer_data, GL_ARRAY_BUFFER, _buffer_upload_usage_flag, true);
+	auto arr_ptr = [&](uint32_t p_off) -> void * {
+		return (uint8_t *)((uintptr_t)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER) + p_off);
+	};
 
-	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, stride * sizeof(float), nullptr);
+	glVertexAttribPointer(VS::ARRAY_VERTEX, 2, GL_FLOAT, GL_FALSE, stride * sizeof(float), arr_ptr(0));
 
-	if (p_colors) {
-		glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, stride * sizeof(float), CAST_INT_TO_UCHAR_PTR(color_offset * sizeof(float)));
-		glEnableVertexAttribArray(VS::ARRAY_COLOR);
-	}
+	glVertexAttribPointer(VS::ARRAY_COLOR, 4, GL_FLOAT, GL_FALSE, stride * sizeof(float), arr_ptr(color_offset * sizeof(float)));
+	glEnableVertexAttribArray(VS::ARRAY_COLOR);
 
-	if (p_uvs) {
-		glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, stride * sizeof(float), CAST_INT_TO_UCHAR_PTR(uv_offset * sizeof(float)));
-		glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
-	}
+	glVertexAttribPointer(VS::ARRAY_TEX_UV, 2, GL_FLOAT, GL_FALSE, stride * sizeof(float), arr_ptr(uv_offset * sizeof(float)));
+	glEnableVertexAttribArray(VS::ARRAY_TEX_UV);
 
 	if (p_light_angles) {
-		glVertexAttribPointer(VS::ARRAY_TANGENT, 1, GL_FLOAT, GL_FALSE, stride * sizeof(float), CAST_INT_TO_UCHAR_PTR(light_angle_offset * sizeof(float)));
+		glVertexAttribPointer(VS::ARRAY_TANGENT, 1, GL_FLOAT, GL_FALSE, stride * sizeof(float), arr_ptr(light_angle_offset * sizeof(float)));
 		glEnableVertexAttribArray(VS::ARRAY_TANGENT);
 	}
 
@@ -700,7 +792,24 @@ void RasterizerCanvasBaseGLES2::_draw_gui_primitive(int p_points, const Vector2 
 		glDisableVertexAttribArray(VS::ARRAY_TANGENT);
 	}
 
-	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+}
+
+void RasterizerCanvasBaseGLES2::_bind_constant_vertex_attrib(int p_location, int p_components, const float *p_value, int p_count) {
+	Vector<float> fill;
+	fill.resize(p_components * p_count);
+	float *w = fill.ptrw();
+	for (int i = 0; i < p_count; i++) {
+		for (int c = 0; c < p_components; c++) {
+			w[i * p_components + c] = p_value[c];
+		}
+	}
+
+	uint32_t bytes = sizeof(float) * p_components * p_count;
+	storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.const_fill_buffer);
+	storage->buffer_orphan_and_upload(bytes, 0, bytes, fill.ptr(), GL_ARRAY_BUFFER, GL_STREAM_DRAW);
+	glEnableVertexAttribArray(p_location);
+	glVertexAttribPointer(p_location, p_components, GL_FLOAT, GL_FALSE, 0, (void *)storage->gl_get_buffer_draw_ptr(GL_ARRAY_BUFFER));
 }
 
 void RasterizerCanvasBaseGLES2::_copy_screen(const Rect2 &p_rect) {
@@ -932,7 +1041,7 @@ void RasterizerCanvasBaseGLES2::initialize() {
 	// quad buffer
 	{
 		glGenBuffers(1, &data.canvas_quad_vertices);
-		glBindBuffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.canvas_quad_vertices);
 
 		const float qv[8] = {
 			0, 0,
@@ -941,10 +1050,30 @@ void RasterizerCanvasBaseGLES2::initialize() {
 			1, 0
 		};
 
-		glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 8, qv, GL_STATIC_DRAW);
+		storage->buffer_orphan_and_upload(sizeof(float) * 8, 0, sizeof(float) * 8, qv, GL_ARRAY_BUFFER, GL_STATIC_DRAW);
 
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
+
+		// Companion real (array-fed, not disabled) white color for the
+		// quad's 4 vertices -- see the Data::canvas_quad_colors_white
+		// comment in the header for why this exists.
+		glGenBuffers(1, &data.canvas_quad_colors_white);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.canvas_quad_colors_white);
+
+		const float qc[16] = {
+			1, 1, 1, 1,
+			1, 1, 1, 1,
+			1, 1, 1, 1,
+			1, 1, 1, 1
+		};
+
+		storage->buffer_orphan_and_upload(sizeof(float) * 16, 0, sizeof(float) * 16, qc, GL_ARRAY_BUFFER, GL_STATIC_DRAW);
+
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
 	}
+
+	// scratch buffer for _bind_constant_vertex_attrib()
+	glGenBuffers(1, &data.const_fill_buffer);
 
 	// polygon buffer
 	{
@@ -953,38 +1082,45 @@ void RasterizerCanvasBaseGLES2::initialize() {
 		poly_size = MAX(poly_size, 2); // minimum 2k, may still see anomalies in editor
 		poly_size *= 1024;
 		glGenBuffers(1, &data.polygon_buffer);
-		glBindBuffer(GL_ARRAY_BUFFER, data.polygon_buffer);
-		glBufferData(GL_ARRAY_BUFFER, poly_size, nullptr, GL_DYNAMIC_DRAW);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, data.polygon_buffer);
+		storage->buffer_orphan_and_upload(poly_size, 0, 0, nullptr, GL_ARRAY_BUFFER, GL_DYNAMIC_DRAW);
 
 		data.polygon_buffer_size = poly_size;
 
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
+		storage->gl_bind_buffer(GL_ARRAY_BUFFER, 0);
 
 		uint32_t index_size = GLOBAL_DEF("rendering/limits/buffers/canvas_polygon_index_buffer_size_kb", 128);
 		ProjectSettings::get_singleton()->set_custom_property_info("rendering/limits/buffers/canvas_polygon_index_buffer_size_kb", PropertyInfo(Variant::INT, "rendering/limits/buffers/canvas_polygon_index_buffer_size_kb", PROPERTY_HINT_RANGE, "0,256,1,or_greater"));
 		index_size = MAX(index_size, 2);
 		index_size *= 1024; // kb
 		glGenBuffers(1, &data.polygon_index_buffer);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.polygon_index_buffer);
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, index_size, nullptr, GL_DYNAMIC_DRAW);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, data.polygon_index_buffer);
+		storage->buffer_orphan_and_upload(index_size, 0, 0, nullptr, GL_ELEMENT_ARRAY_BUFFER, GL_DYNAMIC_DRAW);
+		storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 
 		data.polygon_index_buffer_size = index_size;
 	}
 
 	// ninepatch buffers
 	{
-		// array buffer
+		// array buffer -- content is fully re-uploaded (via
+		// storage->buffer_orphan_and_upload()) before every draw in the
+		// TYPE_NINEPATCH case in rasterizer_canvas_gles2.cpp, so no initial
+		// reservation upload is needed here, just the buffer name.
 		glGenBuffers(1, &data.ninepatch_vertices);
-		glBindBuffer(GL_ARRAY_BUFFER, data.ninepatch_vertices);
 
-		glBufferData(GL_ARRAY_BUFFER, sizeof(float) * (16 + 16) * 2, nullptr, GL_DYNAMIC_DRAW);
-
-		glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-		// element buffer
+		// element buffer -- unlike the vertex buffer above, this is
+		// uploaded ONCE here and only re-bound (never re-uploaded) at draw
+		// time, so it MUST go through storage->gl_bind_buffer()/
+		// buffer_orphan_and_upload() rather than raw glBindBuffer()/
+		// glBufferData(): on ppc those wrapped calls are what actually
+		// populate the CPU-side staging buffer this id's draw-time index
+		// pointer is read from (see gl_bind_buffer()'s declaration
+		// comment) -- a raw upload here would leave that staging buffer
+		// permanently empty, so every glDrawElements() using it would
+		// silently read zeroed/garbage indices.
 		glGenBuffers(1, &data.ninepatch_elements);
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, data.ninepatch_elements);
+		storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, data.ninepatch_elements);
 
 #define _EIDX(y, x) (y * 4 + x)
 		uint8_t elems[3 * 2 * 9] = {
@@ -1030,9 +1166,9 @@ void RasterizerCanvasBaseGLES2::initialize() {
 		};
 #undef _EIDX
 
-		glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(elems), elems, GL_STATIC_DRAW);
+		storage->buffer_orphan_and_upload(sizeof(elems), 0, sizeof(elems), elems, GL_ELEMENT_ARRAY_BUFFER, GL_STATIC_DRAW);
 
-		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+		storage->gl_bind_buffer(GL_ELEMENT_ARRAY_BUFFER, 0);
 	}
 
 	state.canvas_shadow_shader.init();

@@ -5092,6 +5092,22 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 		rt->height = MIN(rt->height, config.max_viewport_dimensions[1]);
 	}
 
+	// Backing-store size actually passed to glTexImage2D/glRenderbufferStorage
+	// below -- see the comment on RenderTarget::alloc_width's declaration.
+	// Some drivers (confirmed via a standalone repro: the ATI Radeon
+	// X1900 / Mac OS X 10.4 Tiger OpenGL 1.5 driver this port targets)
+	// reject any non-power-of-two glTexImage2D call outright with
+	// GL_INVALID_VALUE, even for a plain CLAMP_TO_EDGE, non-mipmapped
+	// texture that the GLES2/ARB_texture_non_power_of_two spec would
+	// otherwise allow -- so round up unconditionally when NPOT isn't
+	// supported, regardless of this texture's actual wrap/mipmap usage.
+	rt->alloc_width = rt->width;
+	rt->alloc_height = rt->height;
+	if (!config.support_npot_repeat_mipmap) {
+		rt->alloc_width = next_power_of_2(rt->width);
+		rt->alloc_height = next_power_of_2(rt->height);
+	}
+
 	GLuint color_internal_format;
 	GLuint color_format;
 	GLuint color_type = GL_UNSIGNED_BYTE;
@@ -5132,7 +5148,7 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 		glGenTextures(1, &rt->color);
 		glBindTexture(GL_TEXTURE_2D, rt->color);
 
-		glTexImage2D(GL_TEXTURE_2D, 0, color_internal_format, rt->width, rt->height, 0, color_format, color_type, nullptr);
+		glTexImage2D(GL_TEXTURE_2D, 0, color_internal_format, rt->alloc_width, rt->alloc_height, 0, color_format, color_type, nullptr);
 
 		if (texture->flags & VS::TEXTURE_FLAG_FILTER) {
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -5152,7 +5168,7 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 		if (config.support_depth_texture) {
 			glGenTextures(1, &rt->depth);
 			glBindTexture(GL_TEXTURE_2D, rt->depth);
-			glTexImage2D(GL_TEXTURE_2D, 0, config.depth_internalformat, rt->width, rt->height, 0, GL_DEPTH_COMPONENT, config.depth_type, nullptr);
+			glTexImage2D(GL_TEXTURE_2D, 0, config.depth_internalformat, rt->alloc_width, rt->alloc_height, 0, GL_DEPTH_COMPONENT, config.depth_type, nullptr);
 
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 			glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
@@ -5164,7 +5180,7 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 			glGenRenderbuffers(1, &rt->depth);
 			glBindRenderbuffer(GL_RENDERBUFFER, rt->depth);
 
-			glRenderbufferStorage(GL_RENDERBUFFER, config.depth_buffer_internalformat, rt->width, rt->height);
+			glRenderbufferStorage(GL_RENDERBUFFER, config.depth_buffer_internalformat, rt->alloc_width, rt->alloc_height);
 
 			glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rt->depth);
 		}
@@ -5183,6 +5199,8 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 			rt->fbo = 0;
 			rt->width = 0;
 			rt->height = 0;
+			rt->alloc_width = 0;
+			rt->alloc_height = 0;
 			rt->color = 0;
 			rt->depth = 0;
 			texture->tex_id = 0;
@@ -5197,9 +5215,9 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 		texture->gl_internal_format_cache = color_internal_format;
 		texture->tex_id = rt->color;
 		texture->width = rt->width;
-		texture->alloc_width = rt->width;
+		texture->alloc_width = rt->alloc_width;
 		texture->height = rt->height;
-		texture->alloc_height = rt->height;
+		texture->alloc_height = rt->alloc_height;
 		texture->active = true;
 
 		texture_set_flags(rt->texture, texture->flags);
@@ -5221,9 +5239,9 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 		glBindTexture(GL_TEXTURE_2D, rt->copy_screen_effect.color);
 
 		if (rt->flags[RasterizerStorage::RENDER_TARGET_TRANSPARENT]) {
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rt->width, rt->height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, rt->alloc_width, rt->alloc_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
 		} else {
-			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rt->width, rt->height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rt->alloc_width, rt->alloc_height, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
 		}
 
 		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
@@ -5249,8 +5267,12 @@ void RasterizerStorageGLES2::_render_target_allocate(RenderTarget *rt) {
 	if (!rt->flags[RasterizerStorage::RENDER_TARGET_NO_3D] && rt->width >= 2 && rt->height >= 2) {
 		for (int i = 0; i < 2; i++) {
 			ERR_FAIL_COND(rt->mip_maps[i].sizes.size());
-			int w = rt->width;
-			int h = rt->height;
+			// Start from the POT-rounded alloc size, not the logical
+			// width/height -- each mip level below is a further /2 of
+			// this, and if the starting point weren't already POT every
+			// derived level would be non-POT too.
+			int w = rt->alloc_width;
+			int h = rt->alloc_height;
 
 			if (i > 0) {
 				w >>= 1;
