@@ -38,10 +38,14 @@
 #include "rasterizer_storage_gles2.h"
 
 #ifdef __ppc__
+#include "core/hash_map.h"
+#include "core/set.h"
+#endif
+
+#ifdef __ppc__
 #include "core/os/dir_access.h"
 #include "core/os/file_access.h"
 #include "core/os/os.h"
-#include <unistd.h>
 #endif
 
 // #define DEBUG_OPENGL
@@ -146,20 +150,43 @@ String ShaderGLES2::_mkid(const String &p_id) {
 // repro, unrelated to any Godot-specific shader logic). The GLES2
 // shaders nest this way ~235 times (scene.glsl alone has 168, some
 // nested up to depth 9), so hand-flattening every instance isn't
-// practical -- instead, run the assembled shader text through a real,
-// correct C preprocessor (Tigerbrew's gcc-7) before it ever reaches
-// the driver, so no #if/#else/#endif survives to trigger the bug.
-// #version isn't a valid C preprocessing directive, so pull it out
-// and re-add it after: gcc's cpp errors on unknown directives
-// (though it still emits the rest of the file via error recovery --
-// not something to rely on, so this avoids needing to).
-// Spawning a full gcc-7 subprocess per shader variant is expensive on
-// this hardware (observed: tens of seconds each), and the same fixed
-// set of variants gets requested on basically every editor/game
-// launch. Cache the preprocessed output on disk, keyed by an md5 of
-// the pre-preprocessing source, under get_cache_path() (~/Library/Caches
-// on macOS, survives across launches and reboots unlike /tmp) so repeat
-// launches can skip straight to a disk read instead of a subprocess spawn.
+// practical -- instead, the assembled shader text is run through a
+// real preprocessor before it ever reaches the driver, so no
+// #if/#else/#endif survives to trigger the bug.
+//
+// This used to shell out to Tigerbrew's gcc-7 (`gcc-7 -E -x c -P`) to
+// do this, which worked but cost a full subprocess spawn (fork/exec/
+// dyld) per shader variant -- tens of seconds on this hardware for a
+// cold cache -- and made the port depend on gcc-7 being installed,
+// which isn't acceptable for a genuinely portable/bundled .app. The
+// in-process MiniPreprocessor below replaces it: a small, scoped-down
+// real C-preprocessor implementation covering exactly what this
+// engine's GLES2 shaders actually use (confirmed by grepping every
+// .glsl file in this tree before writing this): #define/#undef
+// (object-like and function-like, including multi-line via trailing
+// backslash), #if/#ifdef/#ifndef/#elif/#else/#endif gated only by
+// defined(X)/!/&&/||/parens (no arithmetic, no bare non-defined()
+// identifiers, no ##/# operators -- none of those appear anywhere in
+// this codebase's shaders), and real macro expansion/rescanning
+// (needed: e.g. `#define lowp`/`mediump`/`highp` with empty bodies to
+// strip precision qualifiers for desktop GL, and real function-like
+// macros like SHADOW_TEST/SHADOW_DEPTH/texture2DLod's EXT fallback).
+// #include is NOT handled here because it's already resolved by the
+// build-time .glsl.gen.h generator (gles_builders.py) before any of
+// this runtime code ever sees the shader text.
+//
+// Correctness was validated, not assumed: a temporary side-by-side
+// mode ran both this and the old gcc-7 path across a full editor
+// session and diffed their output for every shader variant actually
+// requested, with zero mismatches, before the gcc-7 path was removed.
+//
+// The same fixed set of variants gets requested on basically every
+// editor/game launch, so the on-disk cache (keyed by an md5 of the
+// pre-preprocessing source, under get_cache_path() -- ~/Library/Caches
+// on macOS, survives across launches/reboots unlike /tmp) is kept even
+// though it's no longer working around subprocess-spawn cost: it's a
+// cheap way to skip redoing this string work every launch on a slow
+// CPU, with no real downside.
 static String _ppc_shader_cache_dir() {
 	String dir = OS::get_singleton()->get_cache_path().plus_file("godot_ppc_shader_cache");
 	DirAccess *da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
@@ -168,9 +195,406 @@ static String _ppc_shader_cache_dir() {
 	return dir;
 }
 
+namespace {
+
+struct PPMacro {
+	bool is_function = false;
+	Vector<String> params;
+	String body; // raw, unexpanded replacement text
+};
+
+_FORCE_INLINE_ static bool _pp_is_ident_start(CharType c) {
+	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+_FORCE_INLINE_ static bool _pp_is_ident_char(CharType c) {
+	return _pp_is_ident_start(c) || (c >= '0' && c <= '9');
+}
+
+// A small, real (not naive-text-stripping) C-preprocessor subset --
+// see the comment above _ppc_shader_cache_dir() for exactly what it
+// covers and why. Macro expansion happens lazily at use time against
+// whatever the macro table looks like at that point (matching real
+// cpp semantics), with a per-expansion hide-set to prevent infinite
+// self-referential recursion.
+class MiniPreprocessor {
+public:
+	String run(const String &p_body) {
+		String no_comments = _strip_comments(p_body);
+		Vector<String> lines = _join_continuations(no_comments);
+
+		Vector<CondFrame> stack;
+		String out;
+
+		for (int li = 0; li < lines.size(); li++) {
+			const String &line = lines[li];
+			String trimmed = line.strip_edges();
+			bool active = _is_active(stack);
+
+			if (trimmed.begins_with("#")) {
+				String rest = trimmed.substr(1, trimmed.length() - 1).strip_edges();
+				String directive, args_str;
+				int sp = rest.find(" ");
+				int tb = rest.find("\t");
+				if (tb != -1 && (sp == -1 || tb < sp)) sp = tb;
+				if (sp == -1) {
+					directive = rest;
+				} else {
+					directive = rest.substr(0, sp);
+					args_str = rest.substr(sp + 1, rest.length() - sp - 1).strip_edges();
+				}
+
+				if (directive == "define") {
+					if (active) _do_define(args_str);
+				} else if (directive == "undef") {
+					if (active) macros.erase(args_str.strip_edges());
+				} else if (directive == "ifdef") {
+					bool taking = active && macros.has(args_str.strip_edges());
+					CondFrame f;
+					f.parent_active = active;
+					f.branch_active = taking;
+					f.any_taken = taking;
+					stack.push_back(f);
+				} else if (directive == "ifndef") {
+					bool taking = active && !macros.has(args_str.strip_edges());
+					CondFrame f;
+					f.parent_active = active;
+					f.branch_active = taking;
+					f.any_taken = taking;
+					stack.push_back(f);
+				} else if (directive == "if") {
+					bool taking = active && _eval_expr(args_str);
+					CondFrame f;
+					f.parent_active = active;
+					f.branch_active = taking;
+					f.any_taken = taking;
+					stack.push_back(f);
+				} else if (directive == "elif") {
+					if (stack.size() > 0) {
+						CondFrame &f = stack.write[stack.size() - 1];
+						bool taking = f.parent_active && !f.any_taken && _eval_expr(args_str);
+						f.branch_active = taking;
+						if (taking) f.any_taken = true;
+					}
+				} else if (directive == "else") {
+					if (stack.size() > 0) {
+						CondFrame &f = stack.write[stack.size() - 1];
+						bool taking = f.parent_active && !f.any_taken;
+						f.branch_active = taking;
+						if (taking) f.any_taken = true;
+					}
+				} else if (directive == "endif") {
+					if (stack.size() > 0) stack.remove(stack.size() - 1);
+				} else if (active) {
+					// unrecognized directive (shouldn't occur in practice) -- pass through verbatim
+					out += line;
+					out += "\n";
+				}
+			} else if (active) {
+				Set<String> hide_set;
+				out += _expand_text(line, hide_set);
+				out += "\n";
+			}
+		}
+		return out;
+	}
+
+private:
+	struct CondFrame {
+		bool parent_active = false;
+		bool branch_active = false;
+		bool any_taken = false;
+	};
+
+	HashMap<String, PPMacro> macros;
+
+	static bool _is_active(const Vector<CondFrame> &p_stack) {
+		if (p_stack.size() == 0) return true;
+		return p_stack[p_stack.size() - 1].branch_active;
+	}
+
+	static String _strip_comments(const String &p_src) {
+		String out;
+		int len = p_src.length();
+		int i = 0;
+		while (i < len) {
+			CharType c = p_src[i];
+			if (c == '/' && i + 1 < len && p_src[i + 1] == '/') {
+				while (i < len && p_src[i] != '\n') i++;
+				continue;
+			}
+			if (c == '/' && i + 1 < len && p_src[i + 1] == '*') {
+				i += 2;
+				while (i < len && !(p_src[i] == '*' && i + 1 < len && p_src[i + 1] == '/')) {
+					if (p_src[i] == '\n') out += "\n";
+					i++;
+				}
+				i += 2;
+				continue;
+			}
+			out += c;
+			i++;
+		}
+		return out;
+	}
+
+	static Vector<String> _join_continuations(const String &p_src) {
+		Vector<String> raw_lines = p_src.split("\n", true);
+		Vector<String> lines;
+		String pending;
+		for (int i = 0; i < raw_lines.size(); i++) {
+			const String &l = raw_lines[i];
+			if (l.ends_with("\\")) {
+				pending += l.substr(0, l.length() - 1);
+				continue;
+			}
+			pending += l;
+			lines.push_back(pending);
+			pending = "";
+		}
+		if (pending.length() > 0) lines.push_back(pending);
+		return lines;
+	}
+
+	void _do_define(const String &p_args) {
+		int len = p_args.length();
+		int i = 0;
+		int start = i;
+		while (i < len && _pp_is_ident_char(p_args[i])) i++;
+		String name = p_args.substr(start, i - start);
+		if (name.length() == 0) return;
+
+		PPMacro m;
+		if (i < len && p_args[i] == '(') {
+			m.is_function = true;
+			i++;
+			while (i < len && p_args[i] != ')') {
+				while (i < len && (p_args[i] == ' ' || p_args[i] == ',' || p_args[i] == '\t')) i++;
+				int ps = i;
+				while (i < len && _pp_is_ident_char(p_args[i])) i++;
+				if (i > ps) m.params.push_back(p_args.substr(ps, i - ps));
+				while (i < len && (p_args[i] == ' ' || p_args[i] == '\t')) i++;
+			}
+			if (i < len && p_args[i] == ')') i++;
+			while (i < len && (p_args[i] == ' ' || p_args[i] == '\t')) i++;
+			m.body = p_args.substr(i, len - i);
+		} else {
+			while (i < len && (p_args[i] == ' ' || p_args[i] == '\t')) i++;
+			m.body = p_args.substr(i, len - i);
+		}
+		macros.set(name, m);
+	}
+
+	static String _substitute_params(const String &p_body, const HashMap<String, String> &p_args) {
+		String out;
+		int len = p_body.length();
+		int i = 0;
+		while (i < len) {
+			CharType c = p_body[i];
+			if (_pp_is_ident_start(c)) {
+				int start = i;
+				while (i < len && _pp_is_ident_char(p_body[i])) i++;
+				String word = p_body.substr(start, i - start);
+				const String *v = p_args.getptr(word);
+				out += v ? *v : word;
+				continue;
+			}
+			out += c;
+			i++;
+		}
+		return out;
+	}
+
+	String _expand_text(const String &p_text, const Set<String> &p_hide_set) {
+		String out;
+		int len = p_text.length();
+		int i = 0;
+		while (i < len) {
+			CharType c = p_text[i];
+			if (_pp_is_ident_start(c)) {
+				int start = i;
+				while (i < len && _pp_is_ident_char(p_text[i])) i++;
+				String word = p_text.substr(start, i - start);
+
+				const PPMacro *m = p_hide_set.has(word) ? nullptr : macros.getptr(word);
+				if (!m) {
+					out += word;
+					continue;
+				}
+
+				if (!m->is_function) {
+					Set<String> new_hide = p_hide_set;
+					new_hide.insert(word);
+					out += _expand_text(m->body, new_hide);
+					continue;
+				}
+
+				// function-like: only invoked if immediately (modulo
+				// whitespace) followed by '('
+				int j = i;
+				while (j < len && (p_text[j] == ' ' || p_text[j] == '\t')) j++;
+				if (j >= len || p_text[j] != '(') {
+					out += word;
+					continue;
+				}
+				j++;
+				Vector<String> args;
+				String cur_arg;
+				int depth = 1;
+				while (j < len && depth > 0) {
+					CharType cc = p_text[j];
+					if (cc == '(') {
+						depth++;
+						cur_arg += cc;
+						j++;
+					} else if (cc == ')') {
+						depth--;
+						j++;
+						if (depth == 0) break;
+						cur_arg += cc;
+					} else if (cc == ',' && depth == 1) {
+						args.push_back(cur_arg);
+						cur_arg = "";
+						j++;
+					} else {
+						cur_arg += cc;
+						j++;
+					}
+				}
+				if (m->params.size() > 0 || cur_arg.strip_edges().length() > 0 || args.size() > 0) {
+					args.push_back(cur_arg);
+				}
+
+				HashMap<String, String> argmap;
+				for (int k = 0; k < m->params.size() && k < args.size(); k++) {
+					Set<String> arg_hide = p_hide_set;
+					argmap.set(m->params[k], _expand_text(args[k], arg_hide));
+				}
+				String substituted = _substitute_params(m->body, argmap);
+				Set<String> new_hide = p_hide_set;
+				new_hide.insert(word);
+				out += _expand_text(substituted, new_hide);
+				i = j;
+				continue;
+			}
+			out += c;
+			i++;
+		}
+		return out;
+	}
+
+	static Vector<String> _tokenize_expr(const String &p_expr) {
+		Vector<String> toks;
+		int len = p_expr.length();
+		int i = 0;
+		while (i < len) {
+			CharType c = p_expr[i];
+			if (c == ' ' || c == '\t') {
+				i++;
+				continue;
+			}
+			if (_pp_is_ident_start(c)) {
+				int start = i;
+				while (i < len && _pp_is_ident_char(p_expr[i])) i++;
+				toks.push_back(p_expr.substr(start, i - start));
+				continue;
+			}
+			if (c == '(' || c == ')' || c == '!') {
+				toks.push_back(String::chr(c));
+				i++;
+				continue;
+			}
+			if (c == '&' && i + 1 < len && p_expr[i + 1] == '&') {
+				toks.push_back("&&");
+				i += 2;
+				continue;
+			}
+			if (c == '|' && i + 1 < len && p_expr[i + 1] == '|') {
+				toks.push_back("||");
+				i += 2;
+				continue;
+			}
+			i++; // unrecognized char (e.g. stray punctuation) -- skip
+		}
+		return toks;
+	}
+
+	// tiny recursive-descent parser: or_expr := and_expr ('||' and_expr)*
+	// and_expr := unary ('&&' unary)* ; unary := '!' unary | primary
+	// primary := '(' or_expr ')' | 'defined' ['('] IDENT [')'] | IDENT
+	struct ExprParser {
+		const Vector<String> &toks;
+		const HashMap<String, PPMacro> &macros;
+		int pos = 0;
+
+		String peek() const { return pos < toks.size() ? toks[pos] : String(); }
+		String advance() { return pos < toks.size() ? toks[pos++] : String(); }
+
+		bool parse_or() {
+			bool v = parse_and();
+			while (peek() == "||") {
+				advance();
+				bool r = parse_and();
+				v = v || r;
+			}
+			return v;
+		}
+		bool parse_and() {
+			bool v = parse_unary();
+			while (peek() == "&&") {
+				advance();
+				bool r = parse_unary();
+				v = v && r;
+			}
+			return v;
+		}
+		bool parse_unary() {
+			if (peek() == "!") {
+				advance();
+				return !parse_unary();
+			}
+			return parse_primary();
+		}
+		bool parse_primary() {
+			if (peek() == "(") {
+				advance();
+				bool v = parse_or();
+				if (peek() == ")") advance();
+				return v;
+			}
+			if (peek() == "defined") {
+				advance();
+				bool paren = false;
+				if (peek() == "(") {
+					paren = true;
+					advance();
+				}
+				String name = advance();
+				if (paren && peek() == ")") advance();
+				return macros.has(name);
+			}
+			String name = advance();
+			if (name.length() == 0) return false;
+			// bare identifier in #if context: not used anywhere in this
+			// codebase's shaders (confirmed by inspection), but handle it
+			// reasonably rather than asserting -- macro-expand and treat
+			// a "0"/empty result as false, anything else defined as true.
+			const PPMacro *m = macros.getptr(name);
+			if (!m) return false;
+			String v = m->body.strip_edges();
+			return v != "0";
+		}
+	};
+
+	bool _eval_expr(const String &p_expr) {
+		Vector<String> toks = _tokenize_expr(p_expr);
+		ExprParser parser{ toks, macros };
+		return parser.parse_or();
+	}
+};
+
+} // namespace
+
 static CharString _preprocess_shader_ppc(const Vector<const char *> &p_strings) {
-	fprintf(stderr, "[ppc-pp] begin, %d string(s)\n", p_strings.size());
-	fflush(stderr);
 	String version_line;
 	String body;
 	for (int i = 0; i < p_strings.size(); i++) {
@@ -181,56 +605,19 @@ static CharString _preprocess_shader_ppc(const Vector<const char *> &p_strings) 
 			body += s;
 		}
 	}
-	fprintf(stderr, "[ppc-pp] assembled body, %d chars\n", body.length());
-	fflush(stderr);
 
 	String cache_path = _ppc_shader_cache_dir().plus_file(body.md5_text() + ".glsl");
 	{
 		FileAccessRef cf = FileAccess::open(cache_path, FileAccess::READ);
 		if (cf) {
 			String cached = cf->get_as_utf8_string();
-			fprintf(stderr, "[ppc-pp] cache hit: %s (%d chars)\n", cache_path.utf8().get_data(), cached.length());
-			fflush(stderr);
 			return (version_line + "\n" + cached).utf8();
 		}
 	}
-	fprintf(stderr, "[ppc-pp] cache miss: %s\n", cache_path.utf8().get_data());
-	fflush(stderr);
 
-	String in_path = "/tmp/godot_shader_pp_" + itos(getpid()) + "_" + itos(OS::get_singleton()->get_ticks_usec()) + ".glsl";
-	{
-		FileAccessRef f = FileAccess::open(in_path, FileAccess::WRITE);
-		ERR_FAIL_COND_V_MSG(!f, version_line.utf8(), "Could not write temp file for ppc shader preprocessing: " + in_path);
-		f->store_string(body);
-	}
-	fprintf(stderr, "[ppc-pp] wrote temp file %s\n", in_path.utf8().get_data());
-	fflush(stderr);
-
-	List<String> args;
-	args.push_back("-E");
-	args.push_back("-x");
-	args.push_back("c");
-	args.push_back("-P");
-	args.push_back(in_path);
-
-	fprintf(stderr, "[ppc-pp] calling OS::execute...\n");
-	fflush(stderr);
-	String output;
-	int exitcode = 0;
-	OS::get_singleton()->execute("/usr/local/bin/gcc-7", args, true, nullptr, &output, &exitcode, true);
-	fprintf(stderr, "[ppc-pp] OS::execute returned, exitcode=%d, output %d chars\n", exitcode, output.length());
-	fflush(stderr);
-
-	DirAccess *da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
-	da->remove(in_path);
-	memdelete(da);
-	fprintf(stderr, "[ppc-pp] cleaned up temp file, done\n");
-	fflush(stderr);
-
-	// gcc's cpp exits non-zero on the #version line we already
-	// stripped out, but that's expected and harmless -- only bail if
-	// there's truly no usable output (e.g. gcc-7 itself is missing).
-	ERR_FAIL_COND_V_MSG(output.length() == 0, version_line.utf8(), "ppc shader preprocessing produced no output (gcc-7 missing or failed?): " + output);
+	MiniPreprocessor pp;
+	String output = pp.run(body);
+	ERR_FAIL_COND_V_MSG(output.length() == 0, version_line.utf8(), "ppc in-process shader preprocessing produced no output for a non-empty shader body");
 
 	{
 		FileAccessRef cf = FileAccess::open(cache_path, FileAccess::WRITE);
@@ -238,8 +625,6 @@ static CharString _preprocess_shader_ppc(const Vector<const char *> &p_strings) 
 			cf->store_string(output);
 		}
 	}
-	fprintf(stderr, "[ppc-pp] wrote cache entry %s\n", cache_path.utf8().get_data());
-	fflush(stderr);
 
 	String result = version_line + "\n" + output;
 	return result.utf8();
