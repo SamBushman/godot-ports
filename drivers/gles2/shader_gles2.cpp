@@ -37,6 +37,13 @@
 #include "rasterizer_gles2.h"
 #include "rasterizer_storage_gles2.h"
 
+#ifdef __ppc__
+#include "core/os/dir_access.h"
+#include "core/os/file_access.h"
+#include "core/os/os.h"
+#include <unistd.h>
+#endif
+
 // #define DEBUG_OPENGL
 
 // #include "shaders/copy.glsl.gen.h"
@@ -131,6 +138,114 @@ String ShaderGLES2::_mkid(const String &p_id) {
 	return id.replace("__", "_dus_"); //doubleunderscore is reserved in glsl
 }
 
+#ifdef __ppc__
+// Tiger's ancient ATI GLSL compiler has a real bug with nested
+// #if/#ifdef/#else/#endif blocks: a declaration made in one branch of
+// an outer conditional isn't reliably visible later in the same scope,
+// wrongly reporting it "undeclared" (confirmed via an isolated minimal
+// repro, unrelated to any Godot-specific shader logic). The GLES2
+// shaders nest this way ~235 times (scene.glsl alone has 168, some
+// nested up to depth 9), so hand-flattening every instance isn't
+// practical -- instead, run the assembled shader text through a real,
+// correct C preprocessor (Tigerbrew's gcc-7) before it ever reaches
+// the driver, so no #if/#else/#endif survives to trigger the bug.
+// #version isn't a valid C preprocessing directive, so pull it out
+// and re-add it after: gcc's cpp errors on unknown directives
+// (though it still emits the rest of the file via error recovery --
+// not something to rely on, so this avoids needing to).
+// Spawning a full gcc-7 subprocess per shader variant is expensive on
+// this hardware (observed: tens of seconds each), and the same fixed
+// set of variants gets requested on basically every editor/game
+// launch. Cache the preprocessed output on disk, keyed by an md5 of
+// the pre-preprocessing source, under get_cache_path() (~/Library/Caches
+// on macOS, survives across launches and reboots unlike /tmp) so repeat
+// launches can skip straight to a disk read instead of a subprocess spawn.
+static String _ppc_shader_cache_dir() {
+	String dir = OS::get_singleton()->get_cache_path().plus_file("godot_ppc_shader_cache");
+	DirAccess *da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+	da->make_dir_recursive(dir);
+	memdelete(da);
+	return dir;
+}
+
+static CharString _preprocess_shader_ppc(const Vector<const char *> &p_strings) {
+	fprintf(stderr, "[ppc-pp] begin, %d string(s)\n", p_strings.size());
+	fflush(stderr);
+	String version_line;
+	String body;
+	for (int i = 0; i < p_strings.size(); i++) {
+		String s = String::utf8(p_strings[i]);
+		if (s.begins_with("#version")) {
+			version_line = s;
+		} else {
+			body += s;
+		}
+	}
+	fprintf(stderr, "[ppc-pp] assembled body, %d chars\n", body.length());
+	fflush(stderr);
+
+	String cache_path = _ppc_shader_cache_dir().plus_file(body.md5_text() + ".glsl");
+	{
+		FileAccessRef cf = FileAccess::open(cache_path, FileAccess::READ);
+		if (cf) {
+			String cached = cf->get_as_utf8_string();
+			fprintf(stderr, "[ppc-pp] cache hit: %s (%d chars)\n", cache_path.utf8().get_data(), cached.length());
+			fflush(stderr);
+			return (version_line + "\n" + cached).utf8();
+		}
+	}
+	fprintf(stderr, "[ppc-pp] cache miss: %s\n", cache_path.utf8().get_data());
+	fflush(stderr);
+
+	String in_path = "/tmp/godot_shader_pp_" + itos(getpid()) + "_" + itos(OS::get_singleton()->get_ticks_usec()) + ".glsl";
+	{
+		FileAccessRef f = FileAccess::open(in_path, FileAccess::WRITE);
+		ERR_FAIL_COND_V_MSG(!f, version_line.utf8(), "Could not write temp file for ppc shader preprocessing: " + in_path);
+		f->store_string(body);
+	}
+	fprintf(stderr, "[ppc-pp] wrote temp file %s\n", in_path.utf8().get_data());
+	fflush(stderr);
+
+	List<String> args;
+	args.push_back("-E");
+	args.push_back("-x");
+	args.push_back("c");
+	args.push_back("-P");
+	args.push_back(in_path);
+
+	fprintf(stderr, "[ppc-pp] calling OS::execute...\n");
+	fflush(stderr);
+	String output;
+	int exitcode = 0;
+	OS::get_singleton()->execute("/usr/local/bin/gcc-7", args, true, nullptr, &output, &exitcode, true);
+	fprintf(stderr, "[ppc-pp] OS::execute returned, exitcode=%d, output %d chars\n", exitcode, output.length());
+	fflush(stderr);
+
+	DirAccess *da = DirAccess::create(DirAccess::ACCESS_FILESYSTEM);
+	da->remove(in_path);
+	memdelete(da);
+	fprintf(stderr, "[ppc-pp] cleaned up temp file, done\n");
+	fflush(stderr);
+
+	// gcc's cpp exits non-zero on the #version line we already
+	// stripped out, but that's expected and harmless -- only bail if
+	// there's truly no usable output (e.g. gcc-7 itself is missing).
+	ERR_FAIL_COND_V_MSG(output.length() == 0, version_line.utf8(), "ppc shader preprocessing produced no output (gcc-7 missing or failed?): " + output);
+
+	{
+		FileAccessRef cf = FileAccess::open(cache_path, FileAccess::WRITE);
+		if (cf) {
+			cf->store_string(output);
+		}
+	}
+	fprintf(stderr, "[ppc-pp] wrote cache entry %s\n", cache_path.utf8().get_data());
+	fflush(stderr);
+
+	String result = version_line + "\n" + output;
+	return result.utf8();
+}
+#endif
+
 ShaderGLES2::Version *ShaderGLES2::get_current_version() {
 	Version *_v = version_map.getptr(conditional_version);
 
@@ -168,7 +283,15 @@ ShaderGLES2::Version *ShaderGLES2::get_current_version() {
 	Vector<const char *> strings;
 
 #ifdef GLES_OVER_GL
+#ifdef __ppc__
+	// Tiger's driver for this GPU generation caps out at GLSL 1.10
+	// (confirmed live: GL_SHADING_LANGUAGE_VERSION reports "1.10", and
+	// the compiler flatly rejects "#version 120" with "Version number
+	// not supported by GL2" while "#version 110" compiles fine).
+	strings.push_back("#version 110\n");
+#else
 	strings.push_back("#version 120\n");
+#endif
 	strings.push_back("#define USE_GLES_OVER_GL\n");
 #else
 	strings.push_back("#version 100\n");
@@ -256,7 +379,15 @@ ShaderGLES2::Version *ShaderGLES2::get_current_version() {
 #endif
 
 	v.vert_id = glCreateShader(GL_VERTEX_SHADER);
+#ifdef __ppc__
+	{
+		CharString pp = _preprocess_shader_ppc(strings);
+		const char *pp_ptr = pp.get_data();
+		glShaderSource(v.vert_id, 1, &pp_ptr, nullptr);
+	}
+#else
 	glShaderSource(v.vert_id, strings.size(), (const GLchar**) &strings[0], nullptr);
+#endif
 	glCompileShader(v.vert_id);
 
 	GLint status;
@@ -332,7 +463,15 @@ ShaderGLES2::Version *ShaderGLES2::get_current_version() {
 #endif
 
 	v.frag_id = glCreateShader(GL_FRAGMENT_SHADER);
+#ifdef __ppc__
+	{
+		CharString pp = _preprocess_shader_ppc(strings);
+		const char *pp_ptr = pp.get_data();
+		glShaderSource(v.frag_id, 1, &pp_ptr, nullptr);
+	}
+#else
 	glShaderSource(v.frag_id, strings.size(), (const GLchar**) &strings[0], nullptr);
+#endif
 	glCompileShader(v.frag_id);
 
 	glGetShaderiv(v.frag_id, GL_COMPILE_STATUS, &status);

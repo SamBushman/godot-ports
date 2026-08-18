@@ -32,6 +32,7 @@
 #define RASTERIZER_STORAGE_GLES2_H
 
 #include "core/bitfield_dynamic.h"
+#include "core/hash_map.h"
 #include "core/pool_vector.h"
 #include "core/self_list.h"
 #include "drivers/gles_common/rasterizer_asserts.h"
@@ -1248,6 +1249,21 @@ public:
 
 		int x, y, width, height;
 
+		// Actual backing-store size of color/depth/copy_screen_effect,
+		// which may be larger than width/height: this port's target
+		// driver (an old ATI OpenGL 1.5 implementation with no
+		// ARB_texture_non_power_of_two) rejects glTexImage2D outright
+		// (GL_INVALID_VALUE) for any non-power-of-two dimension, even
+		// with no mipmaps/repeat requested -- confirmed via a standalone
+		// repro, see project memory. _render_target_allocate() rounds
+		// these up to the next power of two on such platforms and renders
+		// into the width x height sub-rect (OpenGL's origin is
+		// bottom-left, so that's the bottom-left corner); consumers that
+		// sample the whole backing texture (e.g. blit_render_target_to_screen())
+		// must use width/alloc_width, height/alloc_height as the UV
+		// fraction instead of assuming a full 0..1 range.
+		int alloc_width, alloc_height;
+
 		bool flags[RENDER_TARGET_FLAG_MAX];
 
 		bool used_in_frame;
@@ -1274,6 +1290,8 @@ public:
 				y(0),
 				width(0),
 				height(0),
+				alloc_width(0),
+				alloc_height(0),
 				used_in_frame(false),
 				msaa(VS::VIEWPORT_MSAA_DISABLED),
 				use_fxaa(false),
@@ -1397,8 +1415,90 @@ public:
 	void buffer_orphan_and_upload(unsigned int p_buffer_size_bytes, unsigned int p_offset_bytes, unsigned int p_data_size_bytes, const void *p_data, GLenum p_target = GL_ARRAY_BUFFER, GLenum p_usage = GL_DYNAMIC_DRAW, bool p_optional_orphan = false) const;
 	bool safe_buffer_sub_data(unsigned int p_total_buffer_size, GLenum p_target, unsigned int p_offset, unsigned int p_data_size, const void *p_data, unsigned int &r_offset_after) const;
 
+#ifdef __ppc__
+	// Tiger's ATI driver has a genuine bug (root-caused via live disassembly:
+	// an atomic refcount increment inside its internal per-VBO tracking table
+	// lands on a bogus, suspiciously-round pointer that Godot never supplied,
+	// not anything we're doing wrong) that crashes on *any* VBO-backed
+	// glDrawArrays/glDrawElements call -- confirmed at three unrelated call
+	// sites so far. Client-side (CPU) arrays never touch the crashing driver
+	// code path, so this keeps every existing GL buffer *name* alive
+	// (glGenBuffers itself is harmless -- only drawing with one bound
+	// crashes) but redirects all upload/draw traffic for it to plain CPU
+	// memory instead. To move a VBO call site over to this:
+	//   1. Replace glBindBuffer(target, id) with storage->gl_bind_buffer(target, id).
+	//   2. Uploads already going through buffer_orphan_and_upload()/
+	//      safe_buffer_sub_data() need no further changes -- they're
+	//      redirected automatically. A site still calling glBufferData()/
+	//      glBufferSubData() directly should be switched to call those
+	//      instead (or gain its own such redirection).
+	//   3. At draw time, get the base pointer for glVertexAttribPointer's
+	//      offset math (and for glDrawElements' index pointer) via
+	//      storage->gl_get_buffer_draw_ptr(target) instead of a literal 0 --
+	//      this is safe to do unconditionally (non-ppc builds keep getting
+	//      back nullptr, i.e. identical behavior to today's `0`-based
+	//      VBO-relative offsets), so the call site needs no #ifdef of its own.
+	void gl_bind_buffer(GLenum p_target, GLuint p_id) const;
+	const void *gl_get_buffer_draw_ptr(GLenum p_target) const;
+
+private:
+	// Keyed by uint64_t, not GLuint, because GLuint is ambiguous against
+	// HashMapHasherDefault's overload set on this platform (widens equally
+	// well to both the uint32_t and uint64_t hash() overloads) -- uint64_t
+	// avoids that ambiguity since GLuint -> uint64_t is a single, unambiguous
+	// widening conversion.
+	mutable HashMap<uint64_t, Vector<uint8_t>> ppc_client_buffers;
+	mutable GLuint ppc_bound_array_buffer = 0;
+	mutable GLuint ppc_bound_element_buffer = 0;
+	Vector<uint8_t> *_ppc_client_buffer_for(GLenum p_target, unsigned int p_min_size_bytes) const;
+
+public:
+#else
+	_FORCE_INLINE_ void gl_bind_buffer(GLenum p_target, GLuint p_id) const { glBindBuffer(p_target, p_id); }
+	_FORCE_INLINE_ const void *gl_get_buffer_draw_ptr(GLenum p_target) const { return nullptr; }
+#endif
+
 	RasterizerStorageGLES2();
 };
+
+#ifdef __ppc__
+// See the comment on gl_bind_buffer()'s declaration for why this exists.
+// Both functions below share this: look up (creating if needed) the
+// CPU-side staging buffer for whichever id was last bound to p_target,
+// growing it to p_buffer_size_bytes if it's not already at least that big.
+inline Vector<uint8_t> *RasterizerStorageGLES2::_ppc_client_buffer_for(GLenum p_target, unsigned int p_min_size_bytes) const {
+	GLuint id = (p_target == GL_ELEMENT_ARRAY_BUFFER) ? ppc_bound_element_buffer : ppc_bound_array_buffer;
+	if (!ppc_client_buffers.has(id)) {
+		ppc_client_buffers.set(id, Vector<uint8_t>());
+	}
+	Vector<uint8_t> *buf = ppc_client_buffers.getptr(id);
+	if ((unsigned int)buf->size() < p_min_size_bytes) {
+		buf->resize(p_min_size_bytes);
+	}
+	return buf;
+}
+
+inline void RasterizerStorageGLES2::gl_bind_buffer(GLenum p_target, GLuint p_id) const {
+	if (p_target == GL_ELEMENT_ARRAY_BUFFER) {
+		ppc_bound_element_buffer = p_id;
+	} else {
+		ppc_bound_array_buffer = p_id;
+	}
+	// Never actually bind a real VBO -- the driver bug is triggered by
+	// drawing with one bound, so make sure that can never happen regardless
+	// of what runs between this call and the eventual draw call.
+	glBindBuffer(p_target, 0);
+}
+
+inline const void *RasterizerStorageGLES2::gl_get_buffer_draw_ptr(GLenum p_target) const {
+	GLuint id = (p_target == GL_ELEMENT_ARRAY_BUFFER) ? ppc_bound_element_buffer : ppc_bound_array_buffer;
+	const Vector<uint8_t> *buf = ppc_client_buffers.getptr(id);
+	if (!buf) {
+		return nullptr;
+	}
+	return buf->ptr();
+}
+#endif
 
 inline bool RasterizerStorageGLES2::safe_buffer_sub_data(unsigned int p_total_buffer_size, GLenum p_target, unsigned int p_offset, unsigned int p_data_size, const void *p_data, unsigned int &r_offset_after) const {
 	r_offset_after = p_offset + p_data_size;
@@ -1408,7 +1508,12 @@ inline bool RasterizerStorageGLES2::safe_buffer_sub_data(unsigned int p_total_bu
 		return false;
 	}
 #endif
+#ifdef __ppc__
+	Vector<uint8_t> *buf = _ppc_client_buffer_for(p_target, p_total_buffer_size);
+	memcpy(buf->ptrw() + p_offset, p_data, p_data_size);
+#else
 	glBufferSubData(p_target, p_offset, p_data_size, p_data);
+#endif
 	return true;
 }
 
@@ -1416,6 +1521,11 @@ inline bool RasterizerStorageGLES2::safe_buffer_sub_data(unsigned int p_total_bu
 // bugs causing pipeline stalls
 // NOTE : THESE SIZES ARE IN BYTES. BUFFER SIZES MAY NOT BE SPECIFIED IN BYTES SO REMEMBER TO CONVERT THEM WHEN CALLING.
 inline void RasterizerStorageGLES2::buffer_orphan_and_upload(unsigned int p_buffer_size_bytes, unsigned int p_offset_bytes, unsigned int p_data_size_bytes, const void *p_data, GLenum p_target, GLenum p_usage, bool p_optional_orphan) const {
+	ERR_FAIL_COND((p_offset_bytes + p_data_size_bytes) > p_buffer_size_bytes);
+#ifdef __ppc__
+	Vector<uint8_t> *buf = _ppc_client_buffer_for(p_target, p_buffer_size_bytes);
+	memcpy(buf->ptrw() + p_offset_bytes, p_data, p_data_size_bytes);
+#else
 	// Orphan the buffer to avoid CPU/GPU sync points caused by glBufferSubData
 	// Was previously #ifndef GLES_OVER_GL however this causes stalls on desktop mac also (and possibly other)
 	if (!p_optional_orphan || (config.should_orphan)) {
@@ -1435,8 +1545,8 @@ inline void RasterizerStorageGLES2::buffer_orphan_and_upload(unsigned int p_buff
 		}
 #endif
 	}
-	ERR_FAIL_COND((p_offset_bytes + p_data_size_bytes) > p_buffer_size_bytes);
 	glBufferSubData(p_target, p_offset_bytes, p_data_size_bytes, p_data);
+#endif
 }
 
 #endif // RASTERIZER_STORAGE_GLES2_H

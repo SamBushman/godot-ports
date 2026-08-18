@@ -427,7 +427,17 @@ void RasterizerGLES2::blit_render_target_to_screen(RID p_render_target, const Re
 
 	// TODO normals
 
-	canvas->draw_generic_textured_rect(p_screen_rect, Rect2(0, 0, 1, -1));
+	// rt->color's actual backing store may be padded up to a
+	// power-of-two size larger than rt->width/height (see the comment on
+	// RenderTarget::alloc_width) -- the real rendered content only fills
+	// the width/alloc_width, height/alloc_height fraction of it, so scale
+	// the source rect by that instead of assuming the whole texture (1,
+	// -1 -- the -1 Y-flips since GL texture V=0 is the bottom row) is
+	// valid content. Reduces to the exact previous (1, -1) when
+	// unpadded.
+	float src_u = (float)rt->width / MAX(1, rt->alloc_width);
+	float src_v = (float)rt->height / MAX(1, rt->alloc_height);
+	canvas->draw_generic_textured_rect(p_screen_rect, Rect2(0, 0, src_u, -src_v));
 
 	glBindTexture(GL_TEXTURE_2D, 0);
 	canvas->canvas_end();

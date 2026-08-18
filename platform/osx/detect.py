@@ -81,7 +81,12 @@ def configure(env):
     if "OSXCROSS_ROOT" in os.environ:
         env["osxcross"] = True
 
-    osxver = "10.5" if env["arch"] == "ppc" else "10.7"
+    # ppc here means our Tiger (10.4) native port specifically -- the
+    # 10.4u SDK doesn't have Leopard-only headers like libproc.h, so
+    # targeting "10.5" (fine for the original Leopard-targeting ppc
+    # port this was forked from) makes MAC_OS_X_10_5_FEATURES-gated
+    # code below try to include headers that don't exist in this SDK.
+    osxver = "10.4" if env["arch"] == "ppc" else "10.7"
     if "osx_version" in env:
         osxver = env["osx_version"]
     
@@ -115,6 +120,41 @@ def configure(env):
             env.Append(ASFLAGS=["-arch", "ppc"])
             env.Append(CCFLAGS=["-arch", "ppc"])
             env.Append(LINKFLAGS=["-arch", "ppc"])
+            # Apple's stock /usr/bin/ld on Tiger is cctools-622.9 (~2005)
+            # and has real bugs with a binary this large: it fails to
+            # generate branch islands for the coalesced weak-symbol
+            # section once PPC's bl +/-16MB range is exceeded
+            # ("relocation overflow ... displacement too large" in
+            # __TEXT,__textcoal_nt), and separately doesn't apply its own
+            # (otherwise-working) branch-island mechanism to its own
+            # auto-synthesized saveGPR/restGPR/saveFP/restFP out-of-line
+            # prologue helpers either. Tigerbrew's `ld64` formula (a
+            # MacPorts-recommended, much newer/better-tested linker for
+            # exactly this kind of large PPC binary) fixes both --
+            # `/usr/local/opt/ld64` is Homebrew/Tigerbrew's stable
+            # current-version symlink, so this survives the formula
+            # getting bumped to a new bottle revision. This was tried
+            # before reaching for compiler-side workarounds like
+            # -fno-weak; -fno-weak "fixed" the link but broke correctness
+            # at runtime (duplicate ClassDB registration for every engine
+            # class, since disabling weak linkage stops the *intentional*
+            # single-instance coalescing C++ needs for things like static
+            # initializers too, not just the problematic template bloat)
+            # -- ld64 needs none of that.
+            env.Append(LINKFLAGS=["-B/usr/local/opt/ld64/bin/"])
+            # Apple's Carbon/CoreServices headers (still pulled in
+            # transitively via Cocoa/AppKit) use AltiVec's `vector`
+            # context keyword unconditionally on ppc (see
+            # MachineExceptions.h's Vector128 union). Mainline gcc-7
+            # only recognizes that spelling (vs. the always-available
+            # `__vector`) with AltiVec codegen enabled *and* GNU
+            # extensions on -- strict -std=c++14 (set globally further
+            # below) turns it off even with -maltivec present, so
+            # override back to the gnu++ dialect for ppc specifically.
+            # (Last -std wins on the command line, and this Append runs
+            # before that later global Prepend, so ordering is fine.)
+            env.Append(CCFLAGS=["-maltivec"])
+            env.Append(CXXFLAGS=["-std=gnu++14"])
             # 32-bit PowerPC has no native 64-bit CAS instruction, so 8-byte
             # std::atomic ops (used by core/os/memory.cpp) are lowered to
             # libatomic calls instead of inline instructions.
@@ -197,8 +237,19 @@ def configure(env):
         if env["arch"] == "ppc":
             # PPC builds of tools=yes fail because 'ppc branch out of range'
             # ld: bl PPC branch out of range (33006356 max is +/-16MB): from __start (0x000024B4) to _main (0x01F7CAB0) in '__start'
-            # Some OSXCross doens't point to the correct root location, fix it here?
-            # env.Append(LINKFLAGS=["-Wl,-syslibroot "+root+"/target/SDK/MacOSX10.5.sdk"])
+            # Same __TEXT,__textcoal_nt overflow as the native ppc build
+            # above -- but that build fixed it by switching to Tigerbrew's
+            # ld64 (-B/usr/local/opt/ld64/bin/, only present on the
+            # native Tiger host doing the build), which isn't
+            # available/tested in an osxcross cross-compilation
+            # environment. -fno-weak works around the same overflow at
+            # the cost of breaking C++ vague-linkage coalescing (verified
+            # to cause duplicate ClassDB registration for every engine
+            # class at runtime on the native build) -- keeping it here
+            # only because this path hasn't been validated against a
+            # real linker fix. Prefer finding/pointing at a modern ld64
+            # for the osxcross toolchain instead, if revisiting this.
+            env.Append(CCFLAGS=["-fno-weak"])
             # PowerPC is big-endian; see the matching native-build comment above.
             env.Append(CPPDEFINES=["BIG_ENDIAN_ENABLED"])
             env.Append(LIBS=["atomic"])
