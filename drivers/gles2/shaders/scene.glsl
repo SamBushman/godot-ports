@@ -407,7 +407,15 @@ void main() {
 #if !defined(SKIP_TRANSFORM_USED) && defined(VERTEX_WORLD_COORDS_USED)
 	vertex = world_matrix * vertex;
 #if defined(ENSURE_CORRECT_NORMALS)
-	mat3 normal_matrix = mat3(transpose(inverse(world_matrix)));
+	// This driver's GLSL compiler rejects constructing a matrix
+	// directly from another matrix ("'constructor' : constructing
+	// matrix from matrix (reserved)"), even though mat3(mat4) is
+	// standard GLSL used here to take the upper-left 3x3 of the
+	// normal matrix. Build it from column vectors instead --
+	// mathematically identical, just not the literal mat3(mat4)
+	// constructor form this compiler refuses to accept.
+	mat4 normal_matrix4 = transpose(inverse(world_matrix));
+	mat3 normal_matrix = mat3(normal_matrix4[0].xyz, normal_matrix4[1].xyz, normal_matrix4[2].xyz);
 	normal = normal_matrix * normal;
 #else
 	normal = normalize((world_matrix * vec4(normal, 0.0)).xyz);
@@ -512,7 +520,10 @@ VERTEX_SHADER_CODE
 #if !defined(SKIP_TRANSFORM_USED) && !defined(VERTEX_WORLD_COORDS_USED)
 	vertex = modelview * vertex;
 #if defined(ENSURE_CORRECT_NORMALS)
-	mat3 normal_matrix = mat3(transpose(inverse(modelview)));
+	// See the matching comment above the world_matrix version of this
+	// for why this isn't the more obvious mat3(transpose(inverse(...))).
+	mat4 normal_matrix4 = transpose(inverse(modelview));
+	mat3 normal_matrix = mat3(normal_matrix4[0].xyz, normal_matrix4[1].xyz, normal_matrix4[2].xyz);
 	normal = normal_matrix * normal;
 #else
 	normal = normalize((modelview * vec4(normal, 0.0)).xyz);

@@ -6040,7 +6040,12 @@ void SpatialEditor::_init_indicators() {
 						"} \n"
 						"\n"
 						"void vertex() { \n"
-						"	mat3 mv = orthonormalize(mat3(MODELVIEW_MATRIX)); \n"
+						// This driver's GLSL compiler rejects constructing a matrix
+						// directly from another matrix ("'constructor' : constructing
+						// matrix from matrix (reserved)"), so mat3(MODELVIEW_MATRIX)
+						// (a standard, otherwise-valid way to take a mat4's upper-left
+						// 3x3) is built from column vectors instead here.
+						"	mat3 mv = orthonormalize(mat3(MODELVIEW_MATRIX[0].xyz, MODELVIEW_MATRIX[1].xyz, MODELVIEW_MATRIX[2].xyz)); \n"
 						"	vec3 n = mv * VERTEX; \n"
 						"	float orientation = dot(vec3(0,0,-1),n); \n"
 						"	if (orientation <= 0.005) { \n"
@@ -6086,7 +6091,12 @@ void SpatialEditor::_init_indicators() {
 							"} \n"
 							"\n"
 							"void vertex() { \n"
-							"	mat3 mv = orthonormalize(mat3(MODELVIEW_MATRIX)); \n"
+							// This driver's GLSL compiler rejects constructing a matrix
+						// directly from another matrix ("'constructor' : constructing
+						// matrix from matrix (reserved)"), so mat3(MODELVIEW_MATRIX)
+						// (a standard, otherwise-valid way to take a mat4's upper-left
+						// 3x3) is built from column vectors instead here.
+						"	mat3 mv = orthonormalize(mat3(MODELVIEW_MATRIX[0].xyz, MODELVIEW_MATRIX[1].xyz, MODELVIEW_MATRIX[2].xyz)); \n"
 							"	mv = inverse(mv); \n"
 							"	VERTEX += NORMAL*0.008; \n"
 							"	vec3 camera_dir_local = mv * vec3(0,0,1); \n"
