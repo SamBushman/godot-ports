@@ -245,6 +245,66 @@ VBO-related crash on this driver and have *not* independently
 confirmed your renderer is free of quirk 1's pattern, don't assume
 this one is safe to ignore.)
 
+## 10. The GLSL compiler rejects `matN(matM_expr)` constructors as "reserved"
+
+**Symptom:** a fragment or vertex shader that builds a smaller matrix
+from a larger one using the standard GLSL constructor form --
+`mat3(some_mat4_expression)`, to take the upper-left 3x3, is a common
+idiom for normal-matrix computation -- fails to compile with
+`'constructor' : constructing matrix from matrix (reserved)`. This is
+standard, valid GLSL (1.20+, and widely supported even where not
+strictly spec'd); this driver's GLSL 1.10-era compiler refuses it
+outright as a reserved/unimplemented construct.
+
+**Why this stayed hidden for a long time:** every prior test of this
+port stayed on a 2D-only screen (Godot's Project Manager), which never
+compiles any 3D shader. The first time a real project's 3D viewport
+was opened -- compiling the scene renderer's normal-matrix code and
+the editor's own gizmo shaders for the first time -- this hit
+immediately and repeatedly, on two independent shaders:
+`mat3(transpose(inverse(world_matrix)))`-style code in the engine's
+own `scene.glsl`, and `mat3(MODELVIEW_MATRIX)` in the editor's
+rotation-gizmo shader (the latter is not even in a `.glsl` file --
+it's a Godot shading-language source embedded as a C++ string literal
+in the editor's own source, compiled through the same GLSL pipeline
+at runtime).
+
+**How this was actually isolated -- and why the engine's own default
+error report is actively misleading on this platform specifically:**
+Godot's shader-compile-failure logging dumps the *pre-preprocessing*
+source with its own line numbers, for readability. On every other
+platform this lines up closely enough with what the driver compiled
+to be useful. On this platform it doesn't: the whole reason a
+preprocessing pass exists here at all (see quirk 8) is to strip out
+every `#if`/`#ifdef`/`#else`/`#endif` before the driver ever sees the
+text, so the *actual* compiled text has a completely different line
+count than the raw dump, and the driver's own `0:NNN` error location
+points at a line number that doesn't correspond to anything in the
+default error report. Diagnosing this required temporarily capturing
+and dumping the literal string handed to `glShaderSource` (numbered
+the same way), which immediately showed the exact failing line. If
+you're debugging a GLSL compile failure on this platform and Godot's
+own error dump doesn't seem to correspond to anything reasonable, this
+line-number mismatch is why -- don't trust it, dump the real compiled
+text instead.
+
+**Workaround:** replace `matN(matM_expr)` with an equivalent built from
+column vectors, e.g. `mat3(m[0].xyz, m[1].xyz, m[2].xyz)` instead of
+`mat3(m)` for a `mat4 m` -- mathematically identical (both just take
+the upper-left submatrix), but expressed as a matrix-from-vectors
+constructor instead of matrix-from-matrix, which this compiler has no
+issue with. **This is a general pattern, not a one-off fix**: any
+shader (including ones end users write themselves for their own
+projects on this port) that uses `mat3(SOME_MAT4)`/`mat4(SOME_MAT3)`
+will hit the same error. There's no compiler-level or preprocessor-level
+fix for this implemented in this port yet -- only the two built-in
+engine/editor shaders that were actually hit have been patched. A
+future, more robust fix would catch this generally (e.g. a
+preprocessing-time or shader-compiler-level rewrite of the
+matrix-from-matrix constructor pattern), rather than requiring every
+individual shader that happens to use it to be hand-patched as it's
+discovered.
+
 ## Incidental, non-bug observations worth knowing about this platform
 
 - A freshly-created, not-yet-drawn-into window shows the OS's default
