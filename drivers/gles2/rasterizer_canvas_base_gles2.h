@@ -60,6 +60,13 @@ public:
 
 	struct Data {
 		GLuint canvas_quad_vertices;
+		// Real (not disabled/glVertexAttrib4f-constant) per-vertex white
+		// color for canvas_quad_vertices's 4 vertices -- this port's
+		// target driver corrupts the framebuffer when a disabled vertex
+		// attribute is written into a varying (canvas.glsl unconditionally
+		// does color_interp = color_attrib), so _bind_quad_buffer() always
+		// keeps ARRAY_COLOR enabled and array-fed instead of disabling it.
+		GLuint canvas_quad_colors_white;
 		GLuint polygon_buffer;
 		GLuint polygon_index_buffer;
 
@@ -68,6 +75,12 @@ public:
 
 		GLuint ninepatch_vertices;
 		GLuint ninepatch_elements;
+
+		// Scratch buffer reused by _bind_constant_vertex_attrib() to feed a
+		// single repeated value as a real per-vertex array -- see that
+		// method's comment for why this exists instead of the simpler
+		// disabled-attribute (glVertexAttrib*) path.
+		GLuint const_fill_buffer;
 	} data;
 
 	struct State {
@@ -123,6 +136,15 @@ public:
 	void _draw_polygon(const int *p_indices, int p_index_count, int p_vertex_count, const Vector2 *p_vertices, const Vector2 *p_uvs, const Color *p_colors, bool p_singlecolor, const float *p_weights = nullptr, const int *p_bones = nullptr);
 	void _draw_generic(GLuint p_primitive, int p_vertex_count, const Vector2 *p_vertices, const Vector2 *p_uvs, const Color *p_colors, bool p_singlecolor);
 	void _draw_generic_indices(GLuint p_primitive, const int *p_indices, int p_index_count, int p_vertex_count, const Vector2 *p_vertices, const Vector2 *p_uvs, const Color *p_colors, bool p_singlecolor);
+
+	// Binds p_location as a real, enabled, per-vertex array of p_count
+	// copies of the p_components-float value at p_value -- for feeding a
+	// single constant value (e.g. one flat color for a whole draw) through
+	// a vertex attribute that the active shader writes into a varying,
+	// without using the disabled/glVertexAttrib*-constant path. See the
+	// comment on Data::canvas_quad_colors_white for why the constant path
+	// is unsafe on this port's target driver.
+	void _bind_constant_vertex_attrib(int p_location, int p_components, const float *p_value, int p_count);
 
 	void _bind_quad_buffer();
 	void _copy_texscreen(const Rect2 &p_rect);

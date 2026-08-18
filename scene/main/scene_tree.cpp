@@ -2394,6 +2394,21 @@ SceneTree::SceneTree() {
 	stretch_aspect = STRETCH_ASPECT_IGNORE;
 	stretch_scale = 1.0;
 
+#ifdef __ppc__
+	// This port's target driver (ATI Radeon X1900 / Mac OS X 10.4 Tiger)
+	// has a genuine bug where rendering into an FBO-attached texture via
+	// glClear()/draw calls never actually reaches the texture's real GPU
+	// memory, despite glCheckFramebufferStatus() reporting COMPLETE and
+	// every GL call reporting no error -- confirmed via a standalone
+	// repro, see project memory. This makes the normal Viewport
+	// architecture (render into an offscreen FBO-backed RenderTarget,
+	// then blit that texture to the screen) show nothing at all. Route
+	// the root viewport around it entirely by rendering directly into
+	// the system framebuffer instead -- the RENDER_TARGET_DIRECT_TO_SCREEN
+	// path Godot already has for low-end/GLES2 platforms.
+	root->set_use_render_direct_to_screen(true);
+#endif
+
 	last_screen_size = OS::get_singleton()->get_window_size();
 	_update_root_rect();
 

@@ -147,15 +147,19 @@ void main() {
 #ifdef USE_INSTANCING
 	mat4 extra_matrix_instance = extra_matrix * transpose(mat4(instance_xform0, instance_xform1, instance_xform2, vec4(0.0, 0.0, 0.0, 1.0)));
 	color *= instance_color;
-
-#ifdef USE_INSTANCE_CUSTOM
-	vec4 instance_custom = instance_custom_data;
-#else
-	vec4 instance_custom = vec4(0.0);
-#endif
-
 #else
 	mat4 extra_matrix_instance = extra_matrix;
+#endif
+
+// Nested ifdef/else/endif above -- some old GLSL compilers (confirmed:
+// the ATI driver used by pre-2007 Macs) lose track of a sibling
+// #else branch's declarations across nesting, wrongly reporting them
+// as undeclared later in the function. Keep this second conditional
+// unnested (nesting-equivalent logic via defined()) rather than
+// re-nesting it inside the block above.
+#if defined(USE_INSTANCING) && defined(USE_INSTANCE_CUSTOM)
+	vec4 instance_custom = instance_custom_data;
+#else
 	vec4 instance_custom = vec4(0.0);
 #endif
 
@@ -469,13 +473,22 @@ void main() {
 	bool normal_used = false;
 #endif
 
-	if (use_default_normal) {
-		normal.xy = texture2D(normal_texture, uv).xy * 2.0 - 1.0;
-		normal.z = sqrt(max(0.0, 1.0 - dot(normal.xy, normal.xy)));
-		normal_used = true;
-	} else {
-		normal = vec3(0.0, 0.0, 1.0);
-	}
+	// This port's target driver (ATI Radeon X1900 / Mac OS X 10.4 Tiger)
+	// silently miscompiles a runtime if/else that contains a texture2D()
+	// sample in either branch: confirmed via an isolated repro
+	// (bisect_shader_repro.m) where merely having this construct present
+	// -- even with use_default_normal permanently false, so the
+	// texture2D() branch is never actually taken -- makes every fragment
+	// written by the shader disappear (reads back as the untouched
+	// clear color) with zero GL error anywhere. Removing the branch
+	// entirely and always taking the flat-normal path fixes it. This
+	// fork only ever targets this driver, so normal-mapped 2D canvas
+	// lighting is dropped outright rather than gated behind a new
+	// preprocessor conditional (the build-time shader generator,
+	// gles_builders.py, does a plain substring search for that
+	// directive anywhere in the file, comments included, and would
+	// misregister it as a new togglable enum entry).
+	normal = vec3(0.0, 0.0, 1.0);
 
 	{
 		float normal_depth = 1.0;

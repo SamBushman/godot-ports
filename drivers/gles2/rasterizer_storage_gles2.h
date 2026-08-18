@@ -32,6 +32,7 @@
 #define RASTERIZER_STORAGE_GLES2_H
 
 #include "core/bitfield_dynamic.h"
+#include "core/hash_map.h"
 #include "core/pool_vector.h"
 #include "core/self_list.h"
 #include "drivers/gles_common/rasterizer_asserts.h"
@@ -1248,6 +1249,21 @@ public:
 
 		int x, y, width, height;
 
+		// Actual backing-store size of color/depth/copy_screen_effect,
+		// which may be larger than width/height: this port's target
+		// driver (an old ATI OpenGL 1.5 implementation with no
+		// ARB_texture_non_power_of_two) rejects glTexImage2D outright
+		// (GL_INVALID_VALUE) for any non-power-of-two dimension, even
+		// with no mipmaps/repeat requested -- confirmed via a standalone
+		// repro, see project memory. _render_target_allocate() rounds
+		// these up to the next power of two on such platforms and renders
+		// into the width x height sub-rect (OpenGL's origin is
+		// bottom-left, so that's the bottom-left corner); consumers that
+		// sample the whole backing texture (e.g. blit_render_target_to_screen())
+		// must use width/alloc_width, height/alloc_height as the UV
+		// fraction instead of assuming a full 0..1 range.
+		int alloc_width, alloc_height;
+
 		bool flags[RENDER_TARGET_FLAG_MAX];
 
 		bool used_in_frame;
@@ -1274,6 +1290,8 @@ public:
 				y(0),
 				width(0),
 				height(0),
+				alloc_width(0),
+				alloc_height(0),
 				used_in_frame(false),
 				msaa(VS::VIEWPORT_MSAA_DISABLED),
 				use_fxaa(false),
@@ -1397,6 +1415,24 @@ public:
 	void buffer_orphan_and_upload(unsigned int p_buffer_size_bytes, unsigned int p_offset_bytes, unsigned int p_data_size_bytes, const void *p_data, GLenum p_target = GL_ARRAY_BUFFER, GLenum p_usage = GL_DYNAMIC_DRAW, bool p_optional_orphan = false) const;
 	bool safe_buffer_sub_data(unsigned int p_total_buffer_size, GLenum p_target, unsigned int p_offset, unsigned int p_data_size, const void *p_data, unsigned int &r_offset_after) const;
 
+	// Tiger's ATI driver has a genuine bug (root-caused via live disassembly:
+	// an atomic refcount increment inside its internal per-VBO tracking table
+	// lands on a bogus, suspiciously-round pointer Godot never supplied) that
+	// crashes on VBO-backed glDrawArrays/glDrawElements calls -- but only
+	// when combined with a *second*, separate bug (writing a disabled vertex
+	// attribute into a varying, which corrupted rendering independent of
+	// VBOs at all). A ppc-only CPU-side client-array shim used to route
+	// every VBO upload/bind/draw around real buffer objects entirely to
+	// dodge the crash. Once the varying-corruption bug was fixed and
+	// rendering was verified fully correct, a direct experiment (flip real
+	// VBOs back on with everything else fixed, run the editor through a
+	// full UI render + idle period) showed the crash no longer reproduces
+	// at all -- so the two bugs were never independent, and the workaround
+	// isn't needed. Removed; these are unconditionally the plain
+	// real-buffer-object implementation on every platform, including ppc.
+	_FORCE_INLINE_ void gl_bind_buffer(GLenum p_target, GLuint p_id) const { glBindBuffer(p_target, p_id); }
+	_FORCE_INLINE_ const void *gl_get_buffer_draw_ptr(GLenum p_target) const { return nullptr; }
+
 	RasterizerStorageGLES2();
 };
 
@@ -1416,6 +1452,7 @@ inline bool RasterizerStorageGLES2::safe_buffer_sub_data(unsigned int p_total_bu
 // bugs causing pipeline stalls
 // NOTE : THESE SIZES ARE IN BYTES. BUFFER SIZES MAY NOT BE SPECIFIED IN BYTES SO REMEMBER TO CONVERT THEM WHEN CALLING.
 inline void RasterizerStorageGLES2::buffer_orphan_and_upload(unsigned int p_buffer_size_bytes, unsigned int p_offset_bytes, unsigned int p_data_size_bytes, const void *p_data, GLenum p_target, GLenum p_usage, bool p_optional_orphan) const {
+	ERR_FAIL_COND((p_offset_bytes + p_data_size_bytes) > p_buffer_size_bytes);
 	// Orphan the buffer to avoid CPU/GPU sync points caused by glBufferSubData
 	// Was previously #ifndef GLES_OVER_GL however this causes stalls on desktop mac also (and possibly other)
 	if (!p_optional_orphan || (config.should_orphan)) {
@@ -1435,7 +1472,6 @@ inline void RasterizerStorageGLES2::buffer_orphan_and_upload(unsigned int p_buff
 		}
 #endif
 	}
-	ERR_FAIL_COND((p_offset_bytes + p_data_size_bytes) > p_buffer_size_bytes);
 	glBufferSubData(p_target, p_offset_bytes, p_data_size_bytes, p_data);
 }
 

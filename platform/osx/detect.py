@@ -81,7 +81,12 @@ def configure(env):
     if "OSXCROSS_ROOT" in os.environ:
         env["osxcross"] = True
 
-    osxver = "10.5" if env["arch"] == "ppc" else "10.7"
+    # ppc here means our Tiger (10.4) native port specifically -- the
+    # 10.4u SDK doesn't have Leopard-only headers like libproc.h, so
+    # targeting "10.5" (fine for the original Leopard-targeting ppc
+    # port this was forked from) makes MAC_OS_X_10_5_FEATURES-gated
+    # code below try to include headers that don't exist in this SDK.
+    osxver = "10.4" if env["arch"] == "ppc" else "10.7"
     if "osx_version" in env:
         osxver = env["osx_version"]
     
@@ -137,6 +142,19 @@ def configure(env):
             # initializers too, not just the problematic template bloat)
             # -- ld64 needs none of that.
             env.Append(LINKFLAGS=["-B/usr/local/opt/ld64/bin/"])
+            # Apple's Carbon/CoreServices headers (still pulled in
+            # transitively via Cocoa/AppKit) use AltiVec's `vector`
+            # context keyword unconditionally on ppc (see
+            # MachineExceptions.h's Vector128 union). Mainline gcc-7
+            # only recognizes that spelling (vs. the always-available
+            # `__vector`) with AltiVec codegen enabled *and* GNU
+            # extensions on -- strict -std=c++14 (set globally further
+            # below) turns it off even with -maltivec present, so
+            # override back to the gnu++ dialect for ppc specifically.
+            # (Last -std wins on the command line, and this Append runs
+            # before that later global Prepend, so ordering is fine.)
+            env.Append(CCFLAGS=["-maltivec"])
+            env.Append(CXXFLAGS=["-std=gnu++14"])
             # 32-bit PowerPC has no native 64-bit CAS instruction, so 8-byte
             # std::atomic ops (used by core/os/memory.cpp) are lowered to
             # libatomic calls instead of inline instructions.
