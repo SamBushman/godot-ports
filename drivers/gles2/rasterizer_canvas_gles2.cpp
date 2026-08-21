@@ -483,7 +483,12 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 									// only hold real content in the width/alloc_width, height/alloc_height
 									// fraction of the backing texture -- sample against alloc size here too,
 									// or a SubViewport's texture renders squashed into a corner of its rect.
-									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : Rect2(0, 0, (float)texture->width / texture->alloc_width, (float)texture->height / texture->alloc_height);
+									// texture_set_data() pads regular NPOT textures the same way UNLESS
+									// they use REPEAT/MIPMAPS (stretched instead, to avoid tiling seams/
+									// mip fringing -- see its own comment), in which case the whole 0..1
+									// range is already valid and must not be cropped.
+									bool content_stretched = texture->resize_to_po2 && (texture->flags & (VS::TEXTURE_FLAG_REPEAT | VS::TEXTURE_FLAG_MIPMAPS));
+									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : (content_stretched ? Rect2(0, 0, 1, 1) : Rect2(0, 0, (float)texture->width / texture->alloc_width, (float)texture->height / texture->alloc_height));
 
 									Vector2 uvs[4] = {
 										src_rect.position,
@@ -612,8 +617,10 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 									}
 
 									Size2 texpixel_size(1.0 / tex->alloc_width, 1.0 / tex->alloc_height);
-									// See the matching comment in the branch above -- same NPOT-padding fix.
-									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : Rect2(0, 0, (float)tex->width / tex->alloc_width, (float)tex->height / tex->alloc_height);
+									// See the matching comment in the branch above -- same NPOT-padding fix,
+									// same REPEAT/MIPMAPS (stretched-content) exception.
+									bool content_stretched = tex->resize_to_po2 && (tex->flags & (VS::TEXTURE_FLAG_REPEAT | VS::TEXTURE_FLAG_MIPMAPS));
+									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : (content_stretched ? Rect2(0, 0, 1, 1) : Rect2(0, 0, (float)tex->width / tex->alloc_width, (float)tex->height / tex->alloc_height));
 
 									Rect2 dst_rect = Rect2(r->rect.position, r->rect.size);
 

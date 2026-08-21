@@ -589,7 +589,16 @@ void RasterizerStorageGLES2::texture_allocate(RID p_texture, int p_width, int p_
 
 			bool is_po2 = p_width == po2_width && p_height == po2_height;
 
-			if (!is_po2 && (p_flags & VS::TEXTURE_FLAG_REPEAT || p_flags & VS::TEXTURE_FLAG_MIPMAPS)) {
+			// On this ATI Radeon X1900/Tiger driver, glTexImage2D rejects
+			// ANY non-power-of-two size outright with GL_INVALID_VALUE --
+			// confirmed via a standalone repro matrix (see driver quirk
+			// catalog, quirk 3), independent of wrap/mipmap flags. The
+			// REPEAT/MIPMAPS-only gate below matches the GLES2 spec's
+			// weaker requirement (plain clamped non-mipmapped NPOT is
+			// normally fine even without full NPOT support), which this
+			// driver simply doesn't honor -- so always pad on this
+			// platform, not just when repeat/mipmaps are requested.
+			if (!is_po2) {
 				if (p_flags & VS::TEXTURE_FLAG_USED_FOR_STREAMING) {
 					//not supported
 					ERR_PRINT("Streaming texture for non power of 2 or has mipmaps on this hardware: " + texture->path + "'. Mipmaps and repeat disabled.");
@@ -665,14 +674,31 @@ void RasterizerStorageGLES2::texture_set_data(RID p_texture, const Ref<Image> &p
 	Ref<Image> img = _get_gl_image_and_format(p_image, p_image->get_format(), texture->flags, real_format, format, internal_format, type, compressed, texture->resize_to_po2);
 
 	if (texture->resize_to_po2) {
-		if (p_image->is_compressed()) {
-			ERR_PRINT("Texture '" + texture->path + "' is required to be a power of 2 because it uses either mipmaps or repeat, so it was decompressed. This will hurt performance and memory usage.");
-		}
-
 		if (img == p_image) {
 			img = img->duplicate();
 		}
-		img->resize_to_po2(false, texture->flags & VS::TEXTURE_FLAG_FILTER ? Image::INTERPOLATE_BILINEAR : Image::INTERPOLATE_NEAREST);
+		if (texture->flags & (VS::TEXTURE_FLAG_REPEAT | VS::TEXTURE_FLAG_MIPMAPS)) {
+			// Repeat tiling needs every texel to hold valid content (a
+			// blank-padded border would tile in as visible seams), and
+			// mipmaps need the same for correct minification (a blank
+			// border would dark-fringe smaller levels) -- stretch here.
+			if (p_image->is_compressed()) {
+				ERR_PRINT("Texture '" + texture->path + "' is required to be a power of 2 because it uses either mipmaps or repeat, so it was decompressed. This will hurt performance and memory usage.");
+			}
+			img->resize_to_po2(false, texture->flags & VS::TEXTURE_FLAG_FILTER ? Image::INTERPOLATE_BILINEAR : Image::INTERPOLATE_NEAREST);
+		} else {
+			// Plain clamped, non-mipmapped texture (the vast majority of
+			// icons/sprites/font glyph atlases on this platform, since it
+			// rejects every NPOT glTexImage2D call outright regardless of
+			// flags -- see the driver-quirk comment in texture_allocate()).
+			// Pad with blank space instead of resampling/stretching: no
+			// interpolation cost (this fires on essentially every unique
+			// glyph texture a dynamic font generates), and it keeps
+			// logical-pixel-coordinate region addressing (ninepatch etc.)
+			// correct, since content stays unscaled at the origin exactly
+			// like the render-target padding case.
+			img->crop(texture->alloc_width, texture->alloc_height);
+		}
 	}
 
 	if (config.shrink_textures_x2 && (p_image->has_mipmaps() || !p_image->is_compressed()) && !(texture->flags & VS::TEXTURE_FLAG_USED_FOR_STREAMING)) {

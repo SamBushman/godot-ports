@@ -986,8 +986,20 @@ PREAMBLE(int)::_batch_find_or_create_tex(const RID &p_texture, const RID &p_norm
 
 		new_batch_tex.tex_pixel_size.x = 1.0 / alloc_w;
 		new_batch_tex.tex_pixel_size.y = 1.0 / alloc_h;
-		new_batch_tex.uv_scale.x = (float)w / alloc_w;
-		new_batch_tex.uv_scale.y = (float)h / alloc_h;
+		if (texture->resize_to_po2 && (texture->flags & (VS::TEXTURE_FLAG_REPEAT | VS::TEXTURE_FLAG_MIPMAPS))) {
+			// The source image itself was stretched to fill alloc_w x
+			// alloc_h (see texture_set_data()'s REPEAT/MIPMAPS branch --
+			// plain clamped non-mipmapped NPOT textures are padded, not
+			// stretched, there) -- every texel in the padded store is
+			// real, resampled content, not empty padding, so the whole
+			// 0..1 UV range is valid and must NOT be cropped down to
+			// width/alloc_width like the render-target padding case below.
+			new_batch_tex.uv_scale.x = 1.0f;
+			new_batch_tex.uv_scale.y = 1.0f;
+		} else {
+			new_batch_tex.uv_scale.x = (float)w / alloc_w;
+			new_batch_tex.uv_scale.y = (float)h / alloc_h;
+		}
 		new_batch_tex.flags = texture->flags;
 	} else {
 		// maybe doesn't need doing...

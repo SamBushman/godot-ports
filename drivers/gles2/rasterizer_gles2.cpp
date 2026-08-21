@@ -29,6 +29,7 @@
 /**************************************************************************/
 
 #include "rasterizer_gles2.h"
+#include <unistd.h>
 
 #include "core/os/os.h"
 #include "core/project_settings.h"
@@ -361,6 +362,15 @@ void RasterizerGLES2::set_boot_image(const Ref<Image> &p_image, const Color &p_c
 	}
 	glClear(GL_COLOR_BUFFER_BIT);
 
+	// draw_generic_textured_rect() relies on the canvas shader's
+	// USE_TEXTURE_RECT conditional to interpret the DST_RECT/SRC_RECT
+	// uniforms procedurally instead of expecting real per-vertex
+	// position/UV attribute data. blit_render_target_to_screen() sets
+	// this before drawing; this function never did, which is why the
+	// splash rendered as a solid block instead of the real image
+	// despite decoding and uploading correctly.
+	canvas->_set_texture_rect_mode(true);
+
 	canvas->canvas_begin();
 
 	RID texture = RID_PRIME(storage->texture_create());
@@ -390,7 +400,12 @@ void RasterizerGLES2::set_boot_image(const Ref<Image> &p_image, const Color &p_c
 	RasterizerStorageGLES2::Texture *t = storage->texture_owner.get(texture);
 	WRAPPED_GL_ACTIVE_TEXTURE(GL_TEXTURE0 + storage->config.max_texture_image_units - 1);
 	glBindTexture(GL_TEXTURE_2D, t->tex_id);
-	canvas->draw_generic_textured_rect(screenrect, Rect2(0, 0, 1, 1));
+	// This texture is plain clamped and non-mipmapped, so
+	// texture_set_data() pads it with blank space rather than
+	// stretching (see its own comment) -- sample only the
+	// width/alloc_width, height/alloc_height fraction, same as the
+	// render-target padding case in blit_render_target_to_screen().
+	canvas->draw_generic_textured_rect(screenrect, Rect2(0, 0, (float)t->width / t->alloc_width, (float)t->height / t->alloc_height));
 	glBindTexture(GL_TEXTURE_2D, 0);
 	canvas->canvas_end();
 
