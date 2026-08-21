@@ -477,9 +477,13 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 								RasterizerStorageGLES2::Texture *texture = _bind_canvas_texture(r->texture, r->normal_map);
 
 								if (texture) {
-									Size2 texpixel_size(1.0 / texture->width, 1.0 / texture->height);
+									Size2 texpixel_size(1.0 / texture->alloc_width, 1.0 / texture->alloc_height);
 
-									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : Rect2(0, 0, 1, 1);
+									// NPOT-padded render targets (RenderTarget::alloc_width's comment)
+									// only hold real content in the width/alloc_width, height/alloc_height
+									// fraction of the backing texture -- sample against alloc size here too,
+									// or a SubViewport's texture renders squashed into a corner of its rect.
+									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : Rect2(0, 0, (float)texture->width / texture->alloc_width, (float)texture->height / texture->alloc_height);
 
 									Vector2 uvs[4] = {
 										src_rect.position,
@@ -607,8 +611,9 @@ void RasterizerCanvasGLES2::render_batches(Item *p_current_clip, bool &r_reclip,
 										untile = true;
 									}
 
-									Size2 texpixel_size(1.0 / tex->width, 1.0 / tex->height);
-									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : Rect2(0, 0, 1, 1);
+									Size2 texpixel_size(1.0 / tex->alloc_width, 1.0 / tex->alloc_height);
+									// See the matching comment in the branch above -- same NPOT-padding fix.
+									Rect2 src_rect = (r->flags & CANVAS_RECT_REGION) ? Rect2(r->source.position * texpixel_size, r->source.size * texpixel_size) : Rect2(0, 0, (float)tex->width / tex->alloc_width, (float)tex->height / tex->alloc_height);
 
 									Rect2 dst_rect = Rect2(r->rect.position, r->rect.size);
 

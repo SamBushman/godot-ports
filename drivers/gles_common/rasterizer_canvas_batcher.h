@@ -229,6 +229,12 @@ public:
 		RID RID_normal;
 		TileMode tile_mode;
 		BatchVector2 tex_pixel_size;
+		// width/alloc_width, height/alloc_height -- on platforms that pad
+		// NPOT render-target textures up to the next power of two (see
+		// RenderTarget::alloc_width's comment), real content only occupies
+		// this fraction of the backing texture. 1,1 for every ordinary
+		// (unpadded) texture.
+		BatchVector2 uv_scale;
 		uint32_t flags;
 	};
 
@@ -975,13 +981,20 @@ PREAMBLE(int)::_batch_find_or_create_tex(const RID &p_texture, const RID &p_norm
 			h = 1;
 		}
 
-		new_batch_tex.tex_pixel_size.x = 1.0 / w;
-		new_batch_tex.tex_pixel_size.y = 1.0 / h;
+		int alloc_w = texture->alloc_width ? texture->alloc_width : w;
+		int alloc_h = texture->alloc_height ? texture->alloc_height : h;
+
+		new_batch_tex.tex_pixel_size.x = 1.0 / alloc_w;
+		new_batch_tex.tex_pixel_size.y = 1.0 / alloc_h;
+		new_batch_tex.uv_scale.x = (float)w / alloc_w;
+		new_batch_tex.uv_scale.y = (float)h / alloc_h;
 		new_batch_tex.flags = texture->flags;
 	} else {
 		// maybe doesn't need doing...
 		new_batch_tex.tex_pixel_size.x = 1.0f;
 		new_batch_tex.tex_pixel_size.y = 1.0f;
+		new_batch_tex.uv_scale.x = 1.0f;
+		new_batch_tex.uv_scale.y = 1.0f;
 		new_batch_tex.flags = 0;
 	}
 
@@ -2118,8 +2131,13 @@ bool C_PREAMBLE::_prefill_rect(RasterizerCanvas::Item::CommandRect *rect, FillSt
 			src_max.y -= uv_epsilon;
 		}
 	} else {
+		// NPOT-padded render targets (RenderTarget::alloc_width's comment)
+		// only hold real content in the width/alloc_width, height/alloc_height
+		// fraction of the backing texture -- uv_scale is 1,1 for every
+		// ordinary texture, so this is a no-op everywhere else.
+		const BatchTex &batchtex_whole = bdata.batch_textures[r_fill_state.batch_tex_id];
 		src_min = Vector2(0, 0);
-		src_max = Vector2(1, 1);
+		src_max = Vector2(batchtex_whole.uv_scale.x, batchtex_whole.uv_scale.y);
 	}
 
 	// 10% faster calculating the max first
