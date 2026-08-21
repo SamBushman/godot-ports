@@ -521,6 +521,15 @@ public:
 	RID sbox_instance_offset;
 	RID sbox_instance_xray;
 	RID sbox_instance_xray_offset;
+	// Selection-box geometry baked fresh into real vertex data on this
+	// specific item's actual AABB each time it changes, rather than scaling
+	// a shared unit-cube mesh via instance_set_transform() -- see
+	// ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md. These Refs must stay alive
+	// for as long as the instances above reference them via instance_set_base().
+	Ref<ArrayMesh> sbox_mesh;
+	Ref<ArrayMesh> sbox_mesh_offset;
+	Ref<ArrayMesh> sbox_mesh_xray;
+	Ref<ArrayMesh> sbox_mesh_xray_offset;
 
 	SpatialEditorSelectedItem() {
 		sp = nullptr;
@@ -571,6 +580,11 @@ public:
 
 class SpatialEditor : public VBoxContainer {
 	GDCLASS(SpatialEditor, VBoxContainer);
+
+	// Needs access to selection_box_mat(_xray) and _bake_selection_box_mesh()
+	// to bake fresh selection-box geometry per frame -- see
+	// ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md.
+	friend class SpatialEditorViewport;
 
 public:
 	static const unsigned int VIEWPORTS_COUNT = 4;
@@ -637,8 +651,10 @@ private:
 	float snap_rotate_value;
 	float snap_scale_value;
 
-	Ref<ArrayMesh> selection_box_xray;
-	Ref<ArrayMesh> selection_box;
+	// Materials only -- geometry is baked per-selected-item now, see
+	// SpatialEditorSelectedItem::sbox_mesh*.
+	Ref<Material3D> selection_box_mat;
+	Ref<Material3D> selection_box_mat_xray;
 	RID indicators;
 	RID indicators_instance;
 	RID cursor_mesh;
@@ -734,6 +750,7 @@ private:
 	HBoxContainer *context_menu_hbox = nullptr;
 
 	void _generate_selection_boxes();
+	Ref<ArrayMesh> _bake_selection_box_mesh(const AABB &p_aabb, const Vector3 &p_offset, const Ref<Material3D> &p_material);
 	UndoRedo *undo_redo;
 
 	int camera_override_viewport_id;

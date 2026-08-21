@@ -1472,6 +1472,26 @@ bool RasterizerSceneGLES2::_setup_material(RasterizerStorageGLES2::Material *p_m
 	return shader_rebind;
 }
 
+void RasterizerSceneGLES2::_bind_constant_vertex_attrib(int p_location, int p_components, const float *p_value) {
+	// Feeding a constant through the disabled-attribute glVertexAttrib*
+	// path corrupts the framebuffer on this platform's GL driver whenever
+	// the vertex shader writes that attribute into a varying (which
+	// scene.glsl unconditionally does for NORMAL, and conditionally for
+	// COLOR) -- see ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md #1. Upload the
+	// constant as a real (tiny) per-vertex buffer and keep the array
+	// enabled instead.
+	float fill[4];
+	for (int c = 0; c < p_components; c++) {
+		fill[c] = p_value[c];
+	}
+
+	uint32_t bytes = sizeof(float) * p_components;
+	glBindBuffer(GL_ARRAY_BUFFER, state.const_fill_buffer);
+	storage->buffer_orphan_and_upload(bytes, 0, bytes, fill, GL_ARRAY_BUFFER, GL_STREAM_DRAW);
+	glEnableVertexAttribArray(p_location);
+	glVertexAttribPointer(p_location, p_components, GL_FLOAT, GL_FALSE, 0, CAST_INT_TO_UCHAR_PTR(0));
+}
+
 void RasterizerSceneGLES2::_setup_geometry(RenderList::Element *p_element, RasterizerStorageGLES2::Skeleton *p_skeleton) {
 	switch (p_element->instance->base_type) {
 		case VS::INSTANCE_MESH: {
@@ -1508,16 +1528,17 @@ void RasterizerSceneGLES2::_setup_geometry(RenderList::Element *p_element, Raste
 						glVertexAttribPointer(s->attribs[i].index, s->attribs[i].size, s->attribs[i].type, s->attribs[i].normalized, s->attribs[i].stride, CAST_INT_TO_UCHAR_PTR(s->attribs[i].offset));
 					}
 				} else {
-					glDisableVertexAttribArray(i);
 					switch (i) {
 						case VS::ARRAY_NORMAL: {
-							glVertexAttrib4f(VS::ARRAY_NORMAL, 0.0, 0.0, 1, 1);
+							const float normal_default[4] = { 0.0, 0.0, 1, 1 };
+							_bind_constant_vertex_attrib(VS::ARRAY_NORMAL, 4, normal_default);
 						} break;
 						case VS::ARRAY_COLOR: {
-							glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
-
+							const float color_default[4] = { 1, 1, 1, 1 };
+							_bind_constant_vertex_attrib(VS::ARRAY_COLOR, 4, color_default);
 						} break;
 						default: {
+							glDisableVertexAttribArray(i);
 						}
 					}
 				}
@@ -1667,16 +1688,17 @@ void RasterizerSceneGLES2::_setup_geometry(RenderList::Element *p_element, Raste
 					glEnableVertexAttribArray(i);
 					glVertexAttribPointer(s->attribs[i].index, s->attribs[i].size, s->attribs[i].type, s->attribs[i].normalized, s->attribs[i].stride, CAST_INT_TO_UCHAR_PTR(s->attribs[i].offset));
 				} else {
-					glDisableVertexAttribArray(i);
 					switch (i) {
 						case VS::ARRAY_NORMAL: {
-							glVertexAttrib4f(VS::ARRAY_NORMAL, 0.0, 0.0, 1, 1);
+							const float normal_default[4] = { 0.0, 0.0, 1, 1 };
+							_bind_constant_vertex_attrib(VS::ARRAY_NORMAL, 4, normal_default);
 						} break;
 						case VS::ARRAY_COLOR: {
-							glVertexAttrib4f(VS::ARRAY_COLOR, 1, 1, 1, 1);
-
+							const float color_default[4] = { 1, 1, 1, 1 };
+							_bind_constant_vertex_attrib(VS::ARRAY_COLOR, 4, color_default);
 						} break;
 						default: {
+							glDisableVertexAttribArray(i);
 						}
 					}
 				}
@@ -4071,6 +4093,11 @@ void RasterizerSceneGLES2::initialize() {
 		glBindBuffer(GL_ARRAY_BUFFER, state.sky_verts);
 		glBufferData(GL_ARRAY_BUFFER, sizeof(Vector3) * 8, nullptr, GL_DYNAMIC_DRAW);
 		glBindBuffer(GL_ARRAY_BUFFER, 0);
+	}
+
+	{
+		// scratch buffer for _bind_constant_vertex_attrib()
+		glGenBuffers(1, &state.const_fill_buffer);
 	}
 
 	{

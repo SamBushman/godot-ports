@@ -305,6 +305,84 @@ matrix-from-matrix constructor pattern), rather than requiring every
 individual shader that happens to use it to be hand-patched as it's
 discovered.
 
+## 11. A shared line-primitive mesh scaled per-instance via `instance_set_transform()` renders with corrupted, non-uniformly skewed vertex positions
+
+**Symptom:** a wireframe mesh (`Mesh::PRIMITIVE_LINES`) built once with
+local unit-cube-ish coordinates and then positioned/scaled per use via
+a plain (non-sheared, purely diagonal-scale-plus-translate) instance
+transform renders as a corrupted, asymmetric shape instead of the
+correct box -- edges connect to visibly wrong positions, and for
+larger source AABBs the corruption can push vertices far outside the
+visible area entirely ("off screen"). No GL error is reported at any
+point in the pipeline, and the corruption reproduces identically
+whether the transform's scale is uniform or the mesh has zero, one, or
+several vertex attributes beyond position.
+
+**Root cause:** not fully understood at the GPU/driver-internal level.
+What's established, via extensive isolation:
+- The CPU-side math is provably correct -- the exact `AABB`, `Basis`,
+  and `Transform` values were printed and verified by hand at every
+  step, the shared mesh's committed vertex buffer was verified
+  byte-identical to what was authored, and a from-scratch minimal
+  Cocoa/GLSL repro (a single VBO, a hand-written shader, no Godot
+  involved at all) reproduces the exact same corruption -- ruling out
+  an engine-side bug in the transform or mesh-generation code.
+- It is **not** an instance of quirk #1 (disabled attribute into a
+  varying) -- the corruption persists in the minimal repro even with
+  every extra vertex attribute removed entirely (position-only
+  shader, position-only mesh, `GL_POINTS` instead of `GL_LINES`).
+- It is not about non-uniform scale, matrix row/column-major mixups,
+  or shear -- both the world and projection matrices used in the
+  minimal repro are provably diagonal-plus-translation only, which is
+  mathematically incapable of producing a skewed result on its own.
+- It is not primitive-topology-specific -- switching the minimal
+  repro's draw call from `GL_LINES` to `GL_POINTS` still shows one
+  (of four expected) vertex position landing in the wrong place.
+- The one thing that reliably avoids it: baking the real, final
+  world-space (or object-local-space) vertex positions directly into
+  the mesh's vertex buffer and using an **identity-scale** instance
+  transform (translation/rotation only, from the object's own natural
+  transform), instead of authoring a small/unit-sized shared mesh and
+  relying on a scaled `instance_set_transform()` to place it. This is
+  exactly the pattern the engine's own origin/grid indicator lines
+  (`SpatialEditor::_init_grid()`) already used, which is why those
+  render correctly while a shared-unit-mesh gizmo (the 3D editor's
+  orange selection-box AABB indicator) did not.
+
+**How this was isolated:** the CPU-side transform math was verified
+by printing the exact `AABB`, `Basis::scale()` result, and final
+`Transform` at the point of use. The mesh's local vertex data was
+verified both as authored and as committed into the final `Mesh`
+resource. A minimal, fully isolated Cocoa/`NSOpenGLContext` + hand
+written GLSL repro was then built to rule out any Godot-side
+involvement, and bisected one variable at a time (extra vertex
+attributes present/absent, disabled-vs-enabled attribute feeding,
+`GL_LINES` vs `GL_POINTS`, non-identity vs identity world transform)
+without finding a single-variable trigger -- strongly suggesting the
+actual defect is in the driver's handling of this general
+shared-geometry-plus-instance-transform-scale rendering pattern, not
+any one specific ingredient of it.
+
+**Workaround:** for any gizmo/indicator-style geometry that gets
+repositioned or resized per use (not just drawn once at a fixed
+transform), bake the actual final vertex positions into the mesh
+directly and keep the instance transform at identity scale, rather
+than authoring a small reusable unit mesh and scaling it via
+`instance_set_transform()`. In this port this means regenerating (not
+just re-transforming) the geometry whenever the underlying bounds
+change; see `SpatialEditor::_bake_selection_box_mesh()` and
+`SpatialEditorSelectedItem::sbox_mesh` in `spatial_editor_plugin.cpp`/
+`.h` for the applied fix to the 3D editor's selection-box gizmo. A
+`glBindBuffer(GL_ARRAY_BUFFER, ...)` call added defensively right
+before the draw call, on the theory that some vertex-attribute-buffer
+binding wasn't surviving the gap between attribute setup and the
+actual draw, was tried and **made things categorically worse -- it
+froze the entire machine solid**, requiring a hard power cycle. Do not
+add extra `glBindBuffer`/`glVertexAttribPointer` calls immediately
+before a draw call as a speculative fix for this; it is not a binding
+survival issue, and doing so risks a full GPU/driver lockup on this
+hardware, not just a rendering glitch.
+
 ## Incidental, non-bug observations worth knowing about this platform
 
 - A freshly-created, not-yet-drawn-into window shows the OS's default

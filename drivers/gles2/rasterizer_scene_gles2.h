@@ -223,6 +223,12 @@ public:
 		Vector2 viewport_size;
 
 		Vector2 screen_pixel_size;
+
+		// Scratch buffer reused by _bind_constant_vertex_attrib() to feed a
+		// single repeated value as a real per-vertex array -- avoids writing
+		// a disabled attribute into a varying, which corrupts the framebuffer
+		// on this platform's GL driver (see ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md #1).
+		GLuint const_fill_buffer;
 	} state;
 
 	/* SHADOW ATLAS API */
@@ -760,6 +766,7 @@ public:
 	_FORCE_INLINE_ void _set_cull(bool p_front, bool p_disabled, bool p_reverse_cull);
 	_FORCE_INLINE_ bool _setup_material(RasterizerStorageGLES2::Material *p_material, bool p_alpha_pass, Size2i p_skeleton_tex_size = Size2i(0, 0));
 	_FORCE_INLINE_ void _setup_geometry(RenderList::Element *p_element, RasterizerStorageGLES2::Skeleton *p_skeleton);
+	void _bind_constant_vertex_attrib(int p_location, int p_components, const float *p_value);
 	_FORCE_INLINE_ void _setup_light_type(LightInstance *p_light, ShadowAtlas *shadow_atlas);
 	_FORCE_INLINE_ void _setup_light(LightInstance *p_light, ShadowAtlas *shadow_atlas, const Transform &p_view_transform, bool accum_pass);
 	_FORCE_INLINE_ void _setup_refprobes(ReflectionProbeInstance *p_refprobe1, ReflectionProbeInstance *p_refprobe2, const Transform &p_view_transform, Environment *p_env);

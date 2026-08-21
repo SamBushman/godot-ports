@@ -2865,28 +2865,25 @@ void SpatialEditorViewport::_notification(int p_what) {
 
 			se->aabb = new_aabb;
 
-			Transform t_offset = t;
+			// Bake the AABB directly into real vertex positions (matching
+			// the origin/grid indicator lines) instead of scaling a shared
+			// unit-cube mesh via the instance transform -- see
+			// ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md. The instance
+			// transform is just the item's own natural transform, unmodified.
+			se->sbox_mesh = spatial_editor->_bake_selection_box_mesh(se->aabb, Vector3(0.005, 0.005, 0.005), spatial_editor->selection_box_mat);
+			se->sbox_mesh_offset = spatial_editor->_bake_selection_box_mesh(se->aabb, Vector3(0.01, 0.01, 0.01), spatial_editor->selection_box_mat);
+			se->sbox_mesh_xray = spatial_editor->_bake_selection_box_mesh(se->aabb, Vector3(0.005, 0.005, 0.005), spatial_editor->selection_box_mat_xray);
+			se->sbox_mesh_xray_offset = spatial_editor->_bake_selection_box_mesh(se->aabb, Vector3(0.01, 0.01, 0.01), spatial_editor->selection_box_mat_xray);
 
-			// apply AABB scaling before item's global transform
-			{
-				const Vector3 offset(0.005, 0.005, 0.005);
-				Basis aabb_s;
-				aabb_s.scale(se->aabb.size + offset);
-				t.translate(se->aabb.position - offset / 2);
-				t.basis = t.basis * aabb_s;
-			}
-			{
-				const Vector3 offset(0.01, 0.01, 0.01);
-				Basis aabb_s;
-				aabb_s.scale(se->aabb.size + offset);
-				t_offset.translate(se->aabb.position - offset / 2);
-				t_offset.basis = t_offset.basis * aabb_s;
-			}
+			VisualServer::get_singleton()->instance_set_base(se->sbox_instance, se->sbox_mesh->get_rid());
+			VisualServer::get_singleton()->instance_set_base(se->sbox_instance_offset, se->sbox_mesh_offset->get_rid());
+			VisualServer::get_singleton()->instance_set_base(se->sbox_instance_xray, se->sbox_mesh_xray->get_rid());
+			VisualServer::get_singleton()->instance_set_base(se->sbox_instance_xray_offset, se->sbox_mesh_xray_offset->get_rid());
 
 			VisualServer::get_singleton()->instance_set_transform(se->sbox_instance, t);
-			VisualServer::get_singleton()->instance_set_transform(se->sbox_instance_offset, t_offset);
+			VisualServer::get_singleton()->instance_set_transform(se->sbox_instance_offset, t);
 			VisualServer::get_singleton()->instance_set_transform(se->sbox_instance_xray, t);
-			VisualServer::get_singleton()->instance_set_transform(se->sbox_instance_xray_offset, t_offset);
+			VisualServer::get_singleton()->instance_set_transform(se->sbox_instance_xray_offset, t);
 		}
 
 		if (changed || (spatial_editor->is_gizmo_visible() && !exist)) {
@@ -5091,11 +5088,20 @@ Object *SpatialEditor::_get_editor_data(Object *p_what) {
 	SpatialEditorSelectedItem *si = memnew(SpatialEditorSelectedItem);
 
 	si->sp = sp;
+
+	// Placeholder empty-AABB geometry; the first per-frame update (always
+	// triggered immediately since last_xform_dirty starts true) rebakes
+	// these with the item's real AABB right away.
+	si->sbox_mesh = _bake_selection_box_mesh(AABB(), Vector3(0.005, 0.005, 0.005), selection_box_mat);
+	si->sbox_mesh_offset = _bake_selection_box_mesh(AABB(), Vector3(0.01, 0.01, 0.01), selection_box_mat);
+	si->sbox_mesh_xray = _bake_selection_box_mesh(AABB(), Vector3(0.005, 0.005, 0.005), selection_box_mat_xray);
+	si->sbox_mesh_xray_offset = _bake_selection_box_mesh(AABB(), Vector3(0.01, 0.01, 0.01), selection_box_mat_xray);
+
 	si->sbox_instance = VisualServer::get_singleton()->instance_create2(
-			selection_box->get_rid(),
+			si->sbox_mesh->get_rid(),
 			sp->get_world()->get_scenario());
 	si->sbox_instance_offset = VisualServer::get_singleton()->instance_create2(
-			selection_box->get_rid(),
+			si->sbox_mesh_offset->get_rid(),
 			sp->get_world()->get_scenario());
 	VS::get_singleton()->instance_geometry_set_cast_shadows_setting(
 			si->sbox_instance,
@@ -5105,10 +5111,10 @@ Object *SpatialEditor::_get_editor_data(Object *p_what) {
 	VS::get_singleton()->instance_set_layer_mask(si->sbox_instance, 1 << SpatialEditorViewport::GIZMO_EDIT_LAYER);
 	VS::get_singleton()->instance_set_layer_mask(si->sbox_instance_offset, 1 << SpatialEditorViewport::GIZMO_EDIT_LAYER);
 	si->sbox_instance_xray = VisualServer::get_singleton()->instance_create2(
-			selection_box_xray->get_rid(),
+			si->sbox_mesh_xray->get_rid(),
 			sp->get_world()->get_scenario());
 	si->sbox_instance_xray_offset = VisualServer::get_singleton()->instance_create2(
-			selection_box_xray->get_rid(),
+			si->sbox_mesh_xray_offset->get_rid(),
 			sp->get_world()->get_scenario());
 	VS::get_singleton()->instance_geometry_set_cast_shadows_setting(
 			si->sbox_instance_xray,
@@ -5125,42 +5131,54 @@ Object *SpatialEditor::_get_editor_data(Object *p_what) {
 }
 
 void SpatialEditor::_generate_selection_boxes() {
-	// Use two AABBs to create the illusion of a slightly thicker line.
-	AABB aabb(Vector3(), Vector3(1, 1, 1));
-
-	// Create a x-ray (visible through solid surfaces) and standard version of the selection box.
-	// Both will be drawn at the same position, but with different opacity.
-	// This lets the user see where the selection is while still having a sense of depth.
-	Ref<SurfaceTool> st = memnew(SurfaceTool);
-	Ref<SurfaceTool> st_xray = memnew(SurfaceTool);
-
-	st->begin(Mesh::PRIMITIVE_LINES);
-	st_xray->begin(Mesh::PRIMITIVE_LINES);
-	for (int i = 0; i < 12; i++) {
-		Vector3 a, b;
-		aabb.get_edge(i, a, b);
-
-		st->add_vertex(a);
-		st->add_vertex(b);
-		st_xray->add_vertex(a);
-		st_xray->add_vertex(b);
-	}
-
-	Ref<Material3D> mat = memnew(SpatialMaterial);
-	mat->set_flag(Material3D::FLAG_UNSHADED, true);
+	// Only the materials are shared/global now -- geometry is baked fresh
+	// per selected item's actual AABB in _update_gizmos_and_selection_boxes(),
+	// since scaling a shared unit-cube mesh via instance_set_transform()
+	// corrupts vertex positions on the ATI Radeon X1900/Tiger driver used
+	// throughout this port, even in a minimal standalone repro outside
+	// Godot entirely -- see ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md.
 	const Color selection_box_color = EDITOR_GET("editors/3d/selection_box_color");
+
+	Ref<SpatialMaterial> mat = memnew(SpatialMaterial);
+	mat->set_flag(Material3D::FLAG_UNSHADED, true);
 	mat->set_albedo(selection_box_color);
 	mat->set_feature(Material3D::FEATURE_TRANSPARENT, true);
-	st->set_material(mat);
-	selection_box = st->commit();
+	selection_box_mat = mat;
 
-	Ref<Material3D> mat_xray = memnew(SpatialMaterial);
+	Ref<SpatialMaterial> mat_xray = memnew(SpatialMaterial);
 	mat_xray->set_flag(Material3D::FLAG_UNSHADED, true);
 	mat_xray->set_flag(Material3D::FLAG_DISABLE_DEPTH_TEST, true);
 	mat_xray->set_albedo(selection_box_color * Color(1, 1, 1, 0.15));
 	mat_xray->set_feature(Material3D::FEATURE_TRANSPARENT, true);
-	st_xray->set_material(mat_xray);
-	selection_box_xray = st_xray->commit();
+	selection_box_mat_xray = mat_xray;
+}
+
+Ref<ArrayMesh> SpatialEditor::_bake_selection_box_mesh(const AABB &p_aabb, const Vector3 &p_offset, const Ref<Material3D> &p_material) {
+	// Bakes the AABB's 12 edges directly into real vertex positions (like
+	// the origin/grid indicator lines do) instead of scaling a shared
+	// unit-cube mesh via a transform matrix.
+	AABB padded(p_aabb.position - p_offset / 2, p_aabb.size + p_offset);
+
+	PoolVector3Array points;
+	points.resize(24);
+	{
+		PoolVector3Array::Write w = points.write();
+		for (int i = 0; i < 12; i++) {
+			Vector3 a, b;
+			padded.get_edge(i, a, b);
+			w[i * 2] = a;
+			w[i * 2 + 1] = b;
+		}
+	}
+
+	Ref<ArrayMesh> mesh;
+	mesh.instance();
+	Array d;
+	d.resize(VS::ARRAY_MAX);
+	d[VS::ARRAY_VERTEX] = points;
+	mesh->add_surface_from_arrays(Mesh::PRIMITIVE_LINES, d);
+	mesh->surface_set_material(0, p_material);
+	return mesh;
 }
 
 Dictionary SpatialEditor::get_state() const {
