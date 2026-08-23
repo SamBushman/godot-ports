@@ -526,6 +526,67 @@ reference build exactly, and both the original translate-drag
 #7 and #5 show zero deformation on the eye or body through a full
 drag.
 
+## 13. The GLSL compiler rejects `gl_PointCoord` as an undeclared identifier
+
+**Symptom:** any fragment shader referencing Godot's `POINT_COORD` builtin
+(renamed to `gl_PointCoord` in the generated GLSL, per
+`shader_compiler_gles2.cpp`) fails to compile:
+
+```
+ERROR: 0:179: 'gl_PointCoord' : undeclared identifier
+ERROR: 0:179: 'texture2D' : no matching overloaded function found
+ERROR: 0:179: '=' :  cannot convert from 'const float' to '4-component vector of float'
+```
+
+Per this driver's established behavior on other shader-compile failures
+(quirk 7, 8, 10 above), the affected material's shader then silently
+fails to bind rather than erroring visibly in the viewport, so whatever
+uses it (a point-sprite/particle material) just doesn't render, with no
+obvious on-screen sign anything is wrong. `gl_PointCoord` is a standard
+GLSL built-in on any GLSL 1.20+/GLES2-conformant implementation; this
+driver's GLSL 1.10-era compiler doesn't recognize it at all, consistent
+with the general pattern of quirk 7/10 above (this compiler predates or
+omits several otherwise-standard constructs).
+
+**How this was isolated:** confirmed directly by writing a minimal
+`shader_type spatial; void fragment() { ALBEDO = vec3(POINT_COORD, 0.0); }`
+shader in the live editor on this hardware/driver and observing the
+compile error in the Output panel before the fix, and a clean compile
+(no errors in Output or the Shader panel) after it -- see GitHub issue #4.
+
+**Workaround:** emulate `gl_PointCoord` manually instead of relying on
+the driver to provide it. `shader_compiler_gles2.cpp` renames
+`POINT_COORD` to `point_coord_emulated` (instead of `gl_PointCoord`) for
+`SHADER_SPATIAL`, gated by a new `POINT_COORD_USED` usage-define
+(exactly the same `renames`/`usage_defines` mechanism already used for
+every other Godot-shading-language builtin in this file). `scene.glsl`
+then, under `#if defined(POINT_COORD_USED)`:
+- declares a `varying highp vec3 point_coord_data` (xy = the point's
+  window-space pixel center, z = its pixel size);
+- in the vertex shader, right after `gl_Position` is finalized, computes
+  `point_coord_data.xy = (gl_Position.xy / gl_Position.w * 0.5 + 0.5) * viewport_size`
+  and `point_coord_data.z = point_size` (`viewport_size` and `point_size`
+  are both already-existing uniforms/locals in this shader -- no new
+  plumbing needed for either);
+- in the fragment shader, right before `FRAGMENT_SHADER_CODE` is spliced
+  in, reconstructs `point_coord_emulated` from `gl_FragCoord` (which
+  this driver does support) and `point_coord_data`, flipping Y to match
+  `GL_POINT_SPRITE`'s default upper-left UV origin.
+
+This works because a GL point primitive has exactly one vertex, so
+`point_coord_data` is trivially constant across the whole primitive
+(no `flat` qualifier needed) -- the fragment shader just needs to know
+where that one point's screen-space center and size are to reconstruct
+per-fragment sprite UV from `gl_FragCoord` itself.
+**Scope note:** only `SHADER_SPATIAL` (3D materials/particles) is fixed
+this way. `CANVAS_ITEM` (2D) still renames `POINT_COORD` straight to
+`gl_PointCoord` and would hit the identical rejection if any 2D shader
+used it -- `canvas.glsl` doesn't have an equivalent `viewport_size`
+uniform in its vertex stage yet, so the same fix there needs that
+plumbing added first. Not yet hit in practice, so not fixed preemptively
+per this project's general policy of only patching constructs actually
+encountered (see quirk 10's note on `mat3(matN)`).
+
 ## Incidental, non-bug observations worth knowing about this platform
 
 - A freshly-created, not-yet-drawn-into window shows the OS's default
