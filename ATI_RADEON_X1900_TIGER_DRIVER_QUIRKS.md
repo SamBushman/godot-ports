@@ -463,6 +463,69 @@ position-affecting result, anywhere else in this codebase's shaders,
 is worth suspecting if similarly "some objects fine, some deformed,
 no GL error" symptoms show up elsewhere on this driver.
 
+**IMPORTANT CORRECTION / addendum (2026-08-22, follow-up investigation
+into GitHub issues #5/#7's remaining symptom):** the C++-side-only
+workaround above is **necessary but not sufficient**. Uploading an
+identity value for `camera_inverse_matrix` at runtime does NOT stop
+the driver from executing the in-shader `mat4 * mat4` multiply --
+`scene.glsl`'s vertex shader still contains the literal line
+`mat4 modelview = camera_inverse_matrix * world_matrix;`
+unconditionally, and the compiler has no way to know at compile time
+that a *uniform* will happen to hold identity at runtime, so it always
+emits the same generic multiply codegen regardless. That generic
+codegen is itself unreliable for **some specific operand value
+patterns even when the other operand is runtime-identity** -- found by
+isolating a second, distinct symptom in the same player model: one leg
+(`Cylinder001`) rendered *completely absent* (not merely deformed, not
+mispositioned -- zero pixels, zero GL error) even after the CPU-side
+fix above was fully live, while the other leg (`Cylinder`, a different
+rotation angle) rendered correctly through the exact same code path.
+Proven via a standalone repro (`legs_repro.m`'s `prog5` pass): swapping
+which mesh/transform combination was used ruled out the mesh data
+(`Cylinder001`'s own VBO renders fine through `Cylinder`'s transform,
+and vice versa -- the bug follows the *transform*, not the mesh), and
+both matrices involved are ordinary proper rotations (determinant +1,
+not a mirror/reflection) -- ruling out a winding-order/backface-culling
+explanation too. The only thing that made it render correctly was
+removing the `mat4 * mat4` multiply from the **compiled shader source
+itself**.
+
+**Full fix (both halves needed together):** in addition to the
+C++-side CPU-precompute described above, `drivers/gles2/shader_gles2.cpp`'s
+`_preprocess_shader_ppc()` now does a targeted, literal string
+replacement on the final preprocessed shader text --
+`"mat4 modelview = camera_inverse_matrix * world_matrix;"` becomes
+`"mat4 modelview = world_matrix;"` -- removing the multiply from what
+actually gets compiled on ppc, rather than just hoping the runtime
+identity value saves it. This is done at the **runtime preprocessing**
+stage (C++ string manipulation on already-generated shader text), NOT
+by editing `scene.glsl` directly with a `#ifdef __ppc__` guard --
+editing the raw `.glsl` source would hit the `gles_builders.py`
+substring-matching gotcha documented elsewhere in this project (see
+[[project_godot_ppc_tiger_renderer]]'s Bug 5 notes): the literal string
+`#ifdef ` appearing anywhere in a `.glsl` file, comments included,
+gets misparsed into a bogus new `Conditionals` enum entry at build
+time. Doing the substitution in `_preprocess_shader_ppc()` instead
+sidesteps that entirely, since it runs on text that's already past
+`gles_builders.py`'s build-time parsing. Confirmed safe for every
+`scene.glsl` vertex-shader variant (skeleton/instancing included): the
+`modelview = camera_inverse_matrix * world_matrix` line is computed
+**unconditionally** in the shader source, but only ever *read* when
+`VERTEX_WORLD_COORDS_USED` is not defined -- so aliasing it to
+`world_matrix` is a functional no-op in every variant where it isn't
+used, and the fix does not touch the separate, unconditional
+`camera_inverse_matrix * vertex` codepath used when
+`VERTEX_WORLD_COORDS_USED` *is* defined (untested against this quirk,
+not yet known to be affected).
+
+**Verified live in the real editor** (not just the repro): after this
+second half of the fix, both `Cylinder` and `Cylinder001` render
+correctly and symmetrically in a Top Orthogonal view, matching the
+reference build exactly, and both the original translate-drag
+(`TRANSLATE_STRESS`) and scale-drag (`SCALE_STRESS`) repros from issues
+#7 and #5 show zero deformation on the eye or body through a full
+drag.
+
 ## Incidental, non-bug observations worth knowing about this platform
 
 - A freshly-created, not-yet-drawn-into window shows the OS's default
