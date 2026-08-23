@@ -619,6 +619,30 @@ static CharString _preprocess_shader_ppc(const Vector<const char *> &p_strings) 
 	String output = pp.run(body);
 	ERR_FAIL_COND_V_MSG(output.length() == 0, version_line.utf8(), "ppc in-process shader preprocessing produced no output for a non-empty shader body");
 
+	// The ATI Radeon X1900/Tiger driver's GLSL compiler can silently miscompute
+	// an in-shader mat4*mat4 multiply for certain non-trivial matrices, even
+	// when one runtime operand happens to be identity -- the compiler can't see
+	// that at compile time (it's a uniform, not a literal), so it still emits
+	// the same generic multiply codegen either way, and that codegen is what's
+	// unreliable for some operand value patterns (see
+	// ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md quirk #12; confirmed via a
+	// standalone repro that this can produce a fully degenerate/invisible
+	// result -- not just deformation -- for specific real matrices, e.g. one
+	// of the two player.glb leg transforms). rasterizer_scene_gles2.cpp
+	// already uploads world_transform as the fully CPU-precomputed modelview
+	// and camera_inverse_matrix as identity on this platform, so the in-shader
+	// combine is redundant math the driver can still get wrong -- strip it
+	// from the compiled source entirely rather than relying on the runtime
+	// identity value alone. Safe for every scene.glsl vertex-shader variant:
+	// this line is computed unconditionally but only ever READ when
+	// VERTEX_WORLD_COORDS_USED is not defined (see scene.glsl), so making it
+	// an alias for world_matrix instead of a product is a no-op everywhere
+	// else. camera_inverse_matrix itself is untouched -- a separate,
+	// unconditional mat4*vec4 codepath still uses it directly when
+	// VERTEX_WORLD_COORDS_USED IS defined, which isn't the pattern this quirk
+	// was ever observed to affect.
+	output = output.replace("mat4 modelview = camera_inverse_matrix * world_matrix;", "mat4 modelview = world_matrix;");
+
 	{
 		FileAccessRef cf = FileAccess::open(cache_path, FileAccess::WRITE);
 		if (cf) {
