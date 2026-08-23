@@ -383,6 +383,86 @@ before a draw call as a speculative fix for this; it is not a binding
 survival issue, and doing so risks a full GPU/driver lockup on this
 hardware, not just a rendering glitch.
 
+## 12. The GLSL compiler miscomputes an in-shader `mat4 * mat4` multiply for non-trivial matrices
+
+**Symptom:** a mesh renders with badly mispositioned, deformed, or
+collapsed-looking geometry -- not merely offset, but visibly wrong
+shape, as if some vertices moved independently of others -- while a
+different mesh (or the same mesh at a different transform) drawn in
+the identical frame, through the identical shader, with the identical
+draw call structure, renders perfectly. No GL error at any point in
+the pipeline, and the corruption is present from the very first
+rendered frame; it requires no animation, drag, or repeated transform
+change to appear.
+
+**Root cause:** Godot's real GLES2 vertex shader (`scene.glsl`)
+receives the camera and world matrices as two **separate** uniforms
+and combines them **in-shader**:
+```glsl
+uniform mat4 camera_inverse_matrix;
+uniform mat4 world_transform;
+...
+mat4 modelview = camera_inverse_matrix * world_matrix;
+vertex = modelview * vertex;
+```
+This is standard, unremarkable GLSL and matches upstream Godot's own
+shader exactly -- nothing platform-specific about the code being
+compiled. On this driver, that `mat4 * mat4` product is silently wrong
+whenever **both** operands are non-trivial. An identity `world_matrix`
+(no rotation) multiplies correctly. A `world_matrix` built purely from
+axis permutations (a "clean" 90-degree-style rotation, every entry
+0/1/-1) also multiplies correctly. A `world_matrix` with any
+fractional, non-axis-aligned rotation value (a real ~25-degree model
+transform, and independently confirmed with a synthetic, hand-built,
+textbook-clean 30-degree rotation -- so this is not about any specific
+numeric bit pattern, just "non-trivial value present") does not.
+
+This explains why this bug went unnoticed for a long time despite
+being present on every single frame: most test geometry (UI panels,
+axis-aligned editor gizmos, unrotated objects) never exercises a
+non-trivial `world_matrix` at all, so the multiply happens to be
+correct by construction for it. It only shows up once a real,
+arbitrarily-rotated 3D object is on screen.
+
+**How this was isolated:** a standalone Cocoa+OpenGL repro
+(`legs_repro.m`) was built loading real extracted mesh/transform data
+from a corrupted scene, bisected incrementally against a known-correct
+baseline the same way every other quirk in this document was (see the
+`incremental-repro-bisection` skill for the general method) -- flat
+shading, client-side arrays, real VBOs, real per-vertex lighting, and
+finally the literal real shader source captured verbatim from a
+running debug build (via a temporary `fopen`/`fwrite` dump right
+before `glShaderSource()`) were each ruled in or out one at a time.
+The corruption first appeared only once the literal real shader's
+separate-uniform, in-shader-combine structure was used instead of a
+single precomputed matrix. Two more-specific hypotheses were tested
+and ruled out along the way (non-contiguous vertex attribute
+locations; an implicit vs. explicit `w=1.0` on the position attribute)
+before isolating the actual variable: whether the model/view
+combination happens on the GPU or the CPU, confirmed by drawing the
+identical mesh+transform both ways side by side in the same frame.
+Draw order (which of two same-shader objects is drawn first) was also
+tested and ruled out as a contributing factor.
+
+**Workaround:** never rely on this driver to combine two matrices via
+an in-shader `mat4 * mat4` multiply when the result feeds vertex
+positions. Precompute the combination on the CPU and upload a single
+already-combined matrix instead. In this port: `ppc` now always
+uploads an identity `camera_inverse_matrix`, and folds the real view
+transform into `world_transform` itself (per-instance, on the CPU,
+via `Transform::operator*`) before upload -- see
+`RasterizerSceneGLES2::_render_render_list()` in
+`drivers/gles2/rasterizer_scene_gles2.cpp`. Safe here because this
+shader family uses `camera_inverse_matrix`/`world_transform` only in
+that one combination line (confirmed against the real captured shader
+source) -- if a future shader change ever reads either uniform for
+anything else, this substitution would need revisiting. **This is a
+general pattern, not just this one call site**: any other in-shader
+`matA * matB` product (or `matA * matB * vec`) feeding a
+position-affecting result, anywhere else in this codebase's shaders,
+is worth suspecting if similarly "some objects fine, some deformed,
+no GL error" symptoms show up elsewhere on this driver.
+
 ## Incidental, non-bug observations worth knowing about this platform
 
 - A freshly-created, not-yet-drawn-into window shows the OS's default
