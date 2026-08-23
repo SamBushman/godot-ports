@@ -1150,7 +1150,12 @@ ShaderCompilerGLES2::ShaderCompilerGLES2() {
 	actions[VS::SHADER_SPATIAL].renames["AO"] = "ao";
 	actions[VS::SHADER_SPATIAL].renames["AO_LIGHT_AFFECT"] = "ao_light_affect";
 	actions[VS::SHADER_SPATIAL].renames["EMISSION"] = "emission";
-	actions[VS::SHADER_SPATIAL].renames["POINT_COORD"] = "gl_PointCoord";
+	// PPC/Tiger: this driver's GLSL 1.10-era compiler rejects gl_PointCoord
+	// outright ("undeclared identifier" -- see ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md).
+	// point_coord_emulated is computed manually in scene.glsl from gl_FragCoord
+	// and a varying carrying the point's window-space center + pixel size,
+	// gated by POINT_COORD_USED below.
+	actions[VS::SHADER_SPATIAL].renames["POINT_COORD"] = "point_coord_emulated";
 	actions[VS::SHADER_SPATIAL].renames["INSTANCE_CUSTOM"] = "instance_custom";
 	actions[VS::SHADER_SPATIAL].renames["SCREEN_UV"] = "screen_uv";
 	actions[VS::SHADER_SPATIAL].renames["SCREEN_TEXTURE"] = "screen_texture";
@@ -1196,6 +1201,7 @@ ShaderCompilerGLES2::ShaderCompilerGLES2() {
 	actions[VS::SHADER_SPATIAL].usage_defines["SCREEN_TEXTURE"] = "#define SCREEN_TEXTURE_USED\n";
 	actions[VS::SHADER_SPATIAL].usage_defines["DEPTH_TEXTURE"] = "#define DEPTH_TEXTURE_USED\n";
 	actions[VS::SHADER_SPATIAL].usage_defines["SCREEN_UV"] = "#define SCREEN_UV_USED\n";
+	actions[VS::SHADER_SPATIAL].usage_defines["POINT_COORD"] = "#define POINT_COORD_USED\n";
 
 	actions[VS::SHADER_SPATIAL].usage_defines["DIFFUSE_LIGHT"] = "#define USE_LIGHT_SHADER_CODE\n";
 	actions[VS::SHADER_SPATIAL].usage_defines["SPECULAR_LIGHT"] = "#define USE_LIGHT_SHADER_CODE\n";

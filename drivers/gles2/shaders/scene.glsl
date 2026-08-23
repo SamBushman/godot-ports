@@ -147,6 +147,14 @@ varying vec2 uv_interp;
 varying vec2 uv2_interp;
 #endif
 
+#if defined(POINT_COORD_USED)
+// PPC/Tiger: gl_PointCoord is rejected by this driver's GLSL compiler
+// (see ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md); xy = the point's window-space
+// pixel center, z = its pixel size, both computed after gl_Position/gl_PointSize
+// are finalized below so the fragment stage can reconstruct the point-sprite UV.
+varying highp vec3 point_coord_data;
+#endif
+
 /* clang-format off */
 
 VERTEX_SHADER_GLOBALS
@@ -761,6 +769,13 @@ VERTEX_SHADER_CODE
 #if defined(RENDER_DEPTH) && defined(USE_RGBA_SHADOWS)
 	position_interp = gl_Position;
 #endif
+
+#if defined(POINT_COORD_USED)
+	// See the matching fragment-stage comment: reconstructs what
+	// gl_PointCoord would have given us, since this driver rejects it.
+	point_coord_data.xy = (gl_Position.xy / gl_Position.w * 0.5 + 0.5) * viewport_size;
+	point_coord_data.z = point_size;
+#endif
 }
 
 /* clang-format off */
@@ -1170,6 +1185,10 @@ varying vec2 uv_interp;
 
 #if defined(ENABLE_UV2_INTERP) || defined(USE_LIGHTMAP)
 varying vec2 uv2_interp;
+#endif
+
+#if defined(POINT_COORD_USED)
+varying highp vec3 point_coord_data;
 #endif
 
 varying vec3 view_interp;
@@ -1701,6 +1720,17 @@ void main() {
 
 #if defined(SCREEN_UV_USED)
 	vec2 screen_uv = gl_FragCoord.xy * screen_pixel_size;
+#endif
+
+#if defined(POINT_COORD_USED)
+	// PPC/Tiger: manual replacement for gl_PointCoord, which this driver's
+	// GLSL compiler rejects as an undeclared identifier -- see
+	// ATI_RADEON_X1900_TIGER_DRIVER_QUIRKS.md. point_coord_data.xy/z (set in
+	// the vertex stage) is the point's window-space pixel center and size;
+	// reconstruct the 0..1 sprite UV from the current fragment's window
+	// position, matching GL_POINT_SPRITE's default upper-left UV origin.
+	vec2 point_coord_emulated = (gl_FragCoord.xy - point_coord_data.xy) / point_coord_data.z + vec2(0.5);
+	point_coord_emulated.y = 1.0 - point_coord_emulated.y;
 #endif
 
 	{
