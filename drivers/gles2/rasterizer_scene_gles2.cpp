@@ -2654,7 +2654,22 @@ void RasterizerSceneGLES2::_render_render_list(RenderList::Element **p_elements,
 			}
 
 			state.scene_shader.set_uniform(SceneShaderGLES2::CAMERA_MATRIX, p_view_transform);
+#ifdef __ppc__
+			// This driver's GLSL compiler miscomputes "modelview = camera_inverse_matrix *
+			// world_matrix" in-shader for non-trivial (non-identity, non-axis-aligned)
+			// operands -- confirmed via a standalone repro (legs_repro.m) that isolated
+			// the corruption to exactly this mat4*mat4 product. Workaround: always upload
+			// an identity camera_inverse_matrix here, and instead fold the real
+			// view_transform_inverse into world_transform (per-instance, below) on the
+			// CPU, so the shader's in-shader multiply becomes a no-op (identity * already-
+			// combined matrix) and never exercises the buggy path. Safe because this
+			// shader family (scene.glsl) uses camera_inverse_matrix and world_transform
+			// ONLY in that one combination line -- verified against the real captured
+			// shader source, no other consumer of either uniform exists in this shader.
+			state.scene_shader.set_uniform(SceneShaderGLES2::CAMERA_INVERSE_MATRIX, Transform());
+#else
 			state.scene_shader.set_uniform(SceneShaderGLES2::CAMERA_INVERSE_MATRIX, view_transform_inverse);
+#endif
 			state.scene_shader.set_uniform(SceneShaderGLES2::PROJECTION_MATRIX, p_projection);
 			state.scene_shader.set_uniform(SceneShaderGLES2::PROJECTION_INVERSE_MATRIX, projection_inverse);
 
@@ -2681,7 +2696,15 @@ void RasterizerSceneGLES2::_render_render_list(RenderList::Element **p_elements,
 			}
 		}
 
+#ifdef __ppc__
+		// Pair with the CAMERA_INVERSE_MATRIX==identity workaround above: fold the
+		// real view_transform_inverse into world_transform on the CPU here, so the
+		// shader's "camera_inverse_matrix * world_matrix" becomes identity * (already
+		// combined), sidestepping the driver's buggy in-shader mat4*mat4 multiply.
+		state.scene_shader.set_uniform(SceneShaderGLES2::WORLD_TRANSFORM, view_transform_inverse * e->instance->transform);
+#else
 		state.scene_shader.set_uniform(SceneShaderGLES2::WORLD_TRANSFORM, e->instance->transform);
+#endif
 
 		if (use_lightmap_capture) { //this is per instance, must be set always if present
 			glUniform4fv(state.scene_shader.get_uniform_location(SceneShaderGLES2::LIGHTMAP_CAPTURES), 12, (const GLfloat *)e->instance->lightmap_capture_data.ptr());
