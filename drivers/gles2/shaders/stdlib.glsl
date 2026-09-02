@@ -378,7 +378,14 @@ highp mat4 inverse(highp mat4 m) {
 
 #endif
 
-#ifndef USE_GLES_OVER_GL
+// transpose() is a GLSL 1.20+ builtin. It's polyfilled here whenever the
+// driver won't provide it natively: either because we're on true GLES2
+// (!USE_GLES_OVER_GL), or because we're routing GLES2 through desktop GL
+// but stuck on GLSL 1.10 (GLES_OVER_GL_GLSL110 -- see issue #10: this
+// driver flatly rejects #version 120, and its 1.10 compiler has no
+// transpose() at all, for mat2/mat3/mat4 alike -- confirmed by direct
+// compile test, not just the mat4 case originally reported).
+#if !defined(USE_GLES_OVER_GL) || defined(GLES_OVER_GL_GLSL110)
 
 #if defined(TRANSPOSE_USED)
 
@@ -404,6 +411,10 @@ highp mat4 transpose(highp mat4 m) {
 			vec4(m[0].z, m[1].z, m[2].z, m[3].z),
 			vec4(m[0].w, m[1].w, m[2].w, m[3].w));
 }
+
+#endif
+
+#ifndef USE_GLES_OVER_GL
 
 #if defined(OUTER_PRODUCT_USED)
 

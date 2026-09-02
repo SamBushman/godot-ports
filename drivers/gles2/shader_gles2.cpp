@@ -698,6 +698,11 @@ ShaderGLES2::Version *ShaderGLES2::get_current_version() {
 	// the compiler flatly rejects "#version 120" with "Version number
 	// not supported by GL2" while "#version 110" compiles fine).
 	strings.push_back("#version 110\n");
+	// GLSL 1.10 has no transpose() builtin at all (added in 1.20) -- unlike
+	// stock desktop GL, this driver enforces that strictly (see issue #10).
+	// Signal stdlib.glsl to compile the transpose() polyfills even though
+	// USE_GLES_OVER_GL is set.
+	strings.push_back("#define GLES_OVER_GL_GLSL110\n");
 #else
 	strings.push_back("#version 120\n");
 #endif
