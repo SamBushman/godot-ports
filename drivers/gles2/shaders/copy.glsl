@@ -133,7 +133,7 @@ void main() {
 
 	vec3 cube_normal = normalize(cube_interp);
 	cube_normal.z = -cube_normal.z;
-	cube_normal = mat3(sky_transform) * cube_normal;
+	cube_normal = mat3(sky_transform[0].xyz, sky_transform[1].xyz, sky_transform[2].xyz) * cube_normal;
 	cube_normal.z = -cube_normal.z;
 
 	vec4 color = texturePanorama(source, cube_normal);
@@ -148,7 +148,7 @@ void main() {
 	cube_normal.z = -1.0;
 	cube_normal.x = (cube_normal.z * (-uv_interp.x - asym_proj.x)) / asym_proj.y;
 	cube_normal.y = (cube_normal.z * (-uv_interp.y - asym_proj.z)) / asym_proj.a;
-	cube_normal = mat3(sky_transform) * mat3(pano_transform) * cube_normal;
+	cube_normal = mat3(sky_transform[0].xyz, sky_transform[1].xyz, sky_transform[2].xyz) * mat3(pano_transform[0].xyz, pano_transform[1].xyz, pano_transform[2].xyz) * cube_normal;
 	cube_normal.z = -cube_normal.z;
 
 	vec4 color = texturePanorama(source, normalize(cube_normal.xyz));

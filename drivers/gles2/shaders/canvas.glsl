@@ -269,7 +269,7 @@ VERTEX_SHADER_CODE
 	light_uv_interp.xy = (light_matrix * outvec).xy;
 	light_uv_interp.zw = (light_local_matrix * outvec).xy;
 
-	transformed_light_uv = (mat3(light_matrix_inverse) * vec3(light_uv_interp.zw, 0.0)).xy; //for normal mapping
+	transformed_light_uv = (mat3(light_matrix_inverse[0].xyz, light_matrix_inverse[1].xyz, light_matrix_inverse[2].xyz) * vec3(light_uv_interp.zw, 0.0)).xy; //for normal mapping
 
 #ifdef USE_SHADOWS
 	pos = outvec.xy;
@@ -577,7 +577,7 @@ FRAGMENT_SHADER_CODE
 #ifdef USE_SHADOWS
 
 #ifdef SHADOW_VEC_USED
-		mat3 inverse_light_matrix = mat3(light_matrix);
+		mat3 inverse_light_matrix = mat3(light_matrix[0].xyz, light_matrix[1].xyz, light_matrix[2].xyz);
 		inverse_light_matrix[0] = normalize(inverse_light_matrix[0]);
 		inverse_light_matrix[1] = normalize(inverse_light_matrix[1]);
 		inverse_light_matrix[2] = normalize(inverse_light_matrix[2]);
