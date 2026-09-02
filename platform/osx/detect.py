@@ -28,6 +28,7 @@ def get_opts():
 	("cc", "C Compiler", "gcc"),
         ("cxx", "CXX Compiler", "g++"),
         ("linkflags", "Extra link flags", ""),
+        ("ld64_path", "Path to a modern ld64 bin directory, used as a -B linker search path for native ppc builds (see arch=='ppc' handling below)", "/usr/local/opt/ld64/bin"),
         EnumVariable("macports_clang", "Build using Clang from MacPorts", "no", ("no", "5.0", "devel")),
         BoolVariable("debug_symbols", "Add debugging symbols to release/release_debug builds", True),
         BoolVariable("separate_debug_symbols", "Create a separate file containing debugging symbols", False),
@@ -133,7 +134,9 @@ def configure(env):
             # exactly this kind of large PPC binary) fixes both --
             # `/usr/local/opt/ld64` is Homebrew/Tigerbrew's stable
             # current-version symlink, so this survives the formula
-            # getting bumped to a new bottle revision. This was tried
+            # getting bumped to a new bottle revision -- and is just the
+            # default; override with ld64_path=... for a Tigerbrew
+            # install elsewhere, or any other modern ld64. This was tried
             # before reaching for compiler-side workarounds like
             # -fno-weak; -fno-weak "fixed" the link but broke correctness
             # at runtime (duplicate ClassDB registration for every engine
@@ -141,7 +144,7 @@ def configure(env):
             # single-instance coalescing C++ needs for things like static
             # initializers too, not just the problematic template bloat)
             # -- ld64 needs none of that.
-            env.Append(LINKFLAGS=["-B/usr/local/opt/ld64/bin/"])
+            env.Append(LINKFLAGS=["-B" + env["ld64_path"] + "/"])
             # Apple's Carbon/CoreServices headers (still pulled in
             # transitively via Cocoa/AppKit) use AltiVec's `vector`
             # context keyword unconditionally on ppc (see
