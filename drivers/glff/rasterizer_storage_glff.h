@@ -104,6 +104,15 @@ public:
 
 	/* SHADER (stub -- this backend never compiles a shader, by design) */
 
+	// Never instantiated -- shader_create() always returns an invalid RID
+	// (no RID_Owner<Shader> exists), so no code ever gets a real pointer to
+	// one. Exists purely because drivers/gles_common/rasterizer_canvas_batcher.h
+	// (shared with GLES2/GLES3) declares a typename T_STORAGE::Shader
+	// pointer field for its per-item shader-change-tracking cache -- never
+	// dereferenced on this backend, since canvas_render_items_implementation()
+	// never sets it to anything but nullptr (see rasterizer_canvas_glff.cpp).
+	struct Shader {};
+
 	virtual RID shader_create() { return RID(); }
 	virtual void shader_set_code(RID p_shader, const String &p_code) {}
 	virtual String shader_get_code(RID p_shader) const { return String(); }
