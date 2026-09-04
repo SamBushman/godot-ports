@@ -1,7 +1,6 @@
 #include "rasterizer_glff.h"
 
 #include "core/os/os.h"
-#include <stdio.h>
 
 RasterizerStorage *RasterizerGLFF::get_storage() {
 	return storage;
@@ -45,19 +44,13 @@ void RasterizerGLFF::initialize() {
 }
 
 void RasterizerGLFF::begin_frame(double frame_step) {
-	fprintf(stderr, "GLFF DEBUG: begin_frame enter\n");
-	fflush(stderr);
 	// No per-frame dirty-resource/time bookkeeping needed yet -- Phase 1's
 	// milestone (clear + one hardcoded triangle) doesn't depend on it.
 	// Revisit if a later phase needs frame-relative shader-free effects
 	// (e.g. time-based UV animation) that would read this.
-	fprintf(stderr, "GLFF DEBUG: begin_frame exit\n");
-	fflush(stderr);
 }
 
 void RasterizerGLFF::set_current_render_target(RID p_render_target) {
-	fprintf(stderr, "GLFF DEBUG: set_current_render_target enter, valid=%d\n", p_render_target.is_valid());
-	fflush(stderr);
 	// GLFF has no FBO (proposal §2) -- the default framebuffer is always
 	// bound, there is nothing to bind. A valid p_render_target here means
 	// a SubViewport-as-texture request; real support for that (the
@@ -106,14 +99,8 @@ void RasterizerGLFF::set_boot_image(const Ref<Image> &p_image, const Color &p_co
 }
 
 void RasterizerGLFF::end_frame(bool p_swap_buffers) {
-	fprintf(stderr, "GLFF DEBUG: end_frame enter, swap=%d\n", p_swap_buffers);
-	fflush(stderr);
 	if (p_swap_buffers) {
-		fprintf(stderr, "GLFF DEBUG: calling swap_buffers\n");
-		fflush(stderr);
 		OS::get_singleton()->swap_buffers();
-		fprintf(stderr, "GLFF DEBUG: swap_buffers returned\n");
-		fflush(stderr);
 	} else {
 		glFinish();
 	}

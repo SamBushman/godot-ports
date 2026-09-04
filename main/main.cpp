@@ -30,8 +30,6 @@
 
 #include "main.h"
 
-#include <stdio.h>
-
 #include "core/crypto/crypto.h"
 #include "core/input_map.h"
 #include "core/io/file_access_network.h"
@@ -262,7 +260,7 @@ void finalize_navigation_server() {
 	navigation_2d_server = nullptr;
 }
 
-#define DEBUG_INIT
+//#define DEBUG_INIT
 #ifdef DEBUG_INIT
 #define MAIN_PRINT(m_txt) print_line(m_txt)
 #else
@@ -1632,14 +1630,10 @@ Error Main::setup2(Thread::ID p_main_tid_override) {
 	MAIN_PRINT("Main: Load Modules, Physics, Drivers, Scripts");
 
 	//register_platform_apis();
-	fprintf(stderr, "GLFF DEBUG: pre register_module_types\n"); fflush(stderr);
 	register_module_types();
-	fprintf(stderr, "GLFF DEBUG: post register_module_types\n"); fflush(stderr);
 
 	// Theme needs modules to be initialized so that sub-resources can be loaded.
-	fprintf(stderr, "GLFF DEBUG: pre initialize_theme\n"); fflush(stderr);
 	initialize_theme();
-	fprintf(stderr, "GLFF DEBUG: post initialize_theme\n"); fflush(stderr);
 
 	GLOBAL_DEF("display/mouse_cursor/custom_image", String());
 	GLOBAL_DEF("display/mouse_cursor/custom_image_hotspot", Vector2());
@@ -1654,32 +1648,18 @@ Error Main::setup2(Thread::ID p_main_tid_override) {
 		}
 	}
 
-	fprintf(stderr, "GLFF DEBUG: pre CameraServer::create\n"); fflush(stderr);
 	camera_server = CameraServer::create();
-	fprintf(stderr, "GLFF DEBUG: post CameraServer::create\n"); fflush(stderr);
 
-	fprintf(stderr, "GLFF DEBUG: pre initialize_physics\n"); fflush(stderr);
 	initialize_physics();
-	fprintf(stderr, "GLFF DEBUG: post initialize_physics\n"); fflush(stderr);
-	fprintf(stderr, "GLFF DEBUG: pre initialize_navigation_server\n"); fflush(stderr);
 	initialize_navigation_server();
-	fprintf(stderr, "GLFF DEBUG: post initialize_navigation_server\n"); fflush(stderr);
-	fprintf(stderr, "GLFF DEBUG: pre register_server_singletons\n"); fflush(stderr);
 	register_server_singletons();
-	fprintf(stderr, "GLFF DEBUG: post register_server_singletons\n"); fflush(stderr);
 
-	fprintf(stderr, "GLFF DEBUG: pre register_driver_types\n"); fflush(stderr);
 	register_driver_types();
-	fprintf(stderr, "GLFF DEBUG: post register_driver_types\n"); fflush(stderr);
 
 	// This loads global classes, so it must happen before custom loaders and savers are registered
-	fprintf(stderr, "GLFF DEBUG: pre ScriptServer::init_languages\n"); fflush(stderr);
 	ScriptServer::init_languages();
-	fprintf(stderr, "GLFF DEBUG: post ScriptServer::init_languages\n"); fflush(stderr);
 
-	fprintf(stderr, "GLFF DEBUG: pre load_default_bus_layout\n"); fflush(stderr);
 	audio_server->load_default_bus_layout();
-	fprintf(stderr, "GLFF DEBUG: post load_default_bus_layout\n"); fflush(stderr);
 
 	if (use_debug_profiler && script_debugger) {
 		script_debugger->profiling_start();
@@ -1704,8 +1684,6 @@ static MainTimerSync main_timer_sync;
 
 bool Main::start() {
 	ERR_FAIL_COND_V(!_start_success, false);
-	fprintf(stderr, "GLFF DEBUG: Main::start enter\n");
-	fflush(stderr);
 
 	bool hasicon = false;
 	String doc_tool_path;
@@ -1885,14 +1863,10 @@ bool Main::start() {
 		game_path = GLOBAL_DEF("application/run/main_scene", "");
 	}
 
-	fprintf(stderr, "GLFF DEBUG: Main::start pre-SceneTree-construct\n");
-	fflush(stderr);
 	MainLoop *main_loop = nullptr;
 	if (editor) {
 		main_loop = memnew(SceneTree);
 	};
-	fprintf(stderr, "GLFF DEBUG: Main::start post-SceneTree-construct\n");
-	fflush(stderr);
 	String main_loop_type = GLOBAL_DEF("application/run/main_loop_type", "SceneTree");
 
 	if (test != "") {

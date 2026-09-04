@@ -2332,11 +2332,7 @@ SceneTree::SceneTree() {
 	// check), forced on here since GLFF structurally can't do the FBO+shader
 	// path at all, unlike GLES2 which merely doesn't need to opt into it.
 	if (OS::get_singleton()->get_current_video_driver() == OS::VIDEO_DRIVER_GLFF) {
-		fprintf(stderr, "GLFF DEBUG: scene_tree forcing render_direct_to_screen, enter\n");
-		fflush(stderr);
 		root->set_use_render_direct_to_screen(true);
-		fprintf(stderr, "GLFF DEBUG: scene_tree forcing render_direct_to_screen, exit\n");
-		fflush(stderr);
 	}
 
 	int ref_atlas_size = GLOBAL_DEF_RST("rendering/quality/reflections/atlas_size", 2048);

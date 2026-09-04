@@ -1,11 +1,8 @@
 #include "rasterizer_canvas_glff.h"
 
 #include "rasterizer_storage_glff.h"
-#include <stdio.h>
 
 void RasterizerCanvasGLFF::canvas_begin() {
-	fprintf(stderr, "GLFF DEBUG: canvas_begin enter\n");
-	fflush(stderr);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
 	glMatrixMode(GL_MODELVIEW);
@@ -21,8 +18,6 @@ void RasterizerCanvasGLFF::canvas_end() {
 	glDisableClientState(GL_VERTEX_ARRAY);
 	glDisableClientState(GL_COLOR_ARRAY);
 	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-	fprintf(stderr, "GLFF DEBUG: canvas_end exit\n");
-	fflush(stderr);
 }
 
 void RasterizerCanvasGLFF::reset_canvas() {

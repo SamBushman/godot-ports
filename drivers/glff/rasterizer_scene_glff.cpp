@@ -1,11 +1,8 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
-#include <stdio.h>
 
 void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const CameraMatrix &p_cam_projection, const int p_eye, bool p_cam_ortogonal, InstanceBase **p_cull_result, int p_cull_count, RID *p_light_cull_result, int p_light_cull_count, RID *p_reflection_probe_cull_result, int p_reflection_probe_cull_count, RID p_environment, RID p_shadow_atlas, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass) {
-	fprintf(stderr, "GLFF DEBUG: render_scene enter\n");
-	fflush(stderr);
 	Color bg_color(0, 0, 0, 1);
 	if (p_environment.is_valid()) {
 		Environment *env = environment_owner.getornull(p_environment);
@@ -55,8 +52,6 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	glDrawArrays(GL_TRIANGLES, 0, 3);
 	glDisableClientState(GL_COLOR_ARRAY);
 	glDisableClientState(GL_VERTEX_ARRAY);
-	fprintf(stderr, "GLFF DEBUG: render_scene exit\n");
-	fflush(stderr);
 }
 
 bool RasterizerSceneGLFF::free(RID p_rid) {
