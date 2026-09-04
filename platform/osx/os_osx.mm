@@ -93,6 +93,19 @@
 #define NSUInteger unsigned long
 #endif
 
+// CGFloat itself is a Leopard-era (10.5+) addition -- true Tiger (10.4)
+// SDK headers don't declare it at all. It's just `float` on 32-bit PPC
+// (the 32/64-bit distinction this typedef exists for only matters on
+// architectures that can be either), so this is a safe, exact stand-in,
+// not an approximation. Found building godot-ports#14 (GLFF proposal)'s
+// Phase 1 on the G4 -- the first time this branch has actually been
+// compiled against a true 10.4 target rather than an accidentally-10.5+
+// one (see platform/osx/detect.py's osx_version auto-detect fix).
+#ifndef CGFLOAT_DEFINED
+typedef float CGFloat;
+#define CGFLOAT_DEFINED 1
+#endif
+
 
 static void get_key_modifier_state(unsigned int p_osx_state, Ref<InputEventWithModifiers> state) {
 	state->set_shift((p_osx_state & NSEventModifierFlagShift));
