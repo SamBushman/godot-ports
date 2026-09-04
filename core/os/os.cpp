@@ -833,13 +833,15 @@ void OS::center_window() {
 }
 
 int OS::get_video_driver_count() const {
-	return 2;
+	return 3;
 }
 
 const char *OS::get_video_driver_name(int p_driver) const {
 	switch (p_driver) {
 		case VIDEO_DRIVER_GLES2:
 			return "GLES2";
+		case VIDEO_DRIVER_GLFF:
+			return "GLFF";
 		case VIDEO_DRIVER_GLES3:
 		default:
 			return "GLES3";

@@ -2325,6 +2325,16 @@ SceneTree::SceneTree() {
 	root->set_as_audio_listener_2d(true);
 	current_scene = nullptr;
 
+	// GLFF (OpenGL 1.2 fixed-function) has no shader to blit an off-screen
+	// render target to the window, so the root viewport must render straight
+	// to the default framebuffer -- this is the engine's existing low-end
+	// bypass (see visual_server_viewport.cpp's viewport_render_direct_to_screen
+	// check), forced on here since GLFF structurally can't do the FBO+shader
+	// path at all, unlike GLES2 which merely doesn't need to opt into it.
+	if (OS::get_singleton()->get_current_video_driver() == OS::VIDEO_DRIVER_GLFF) {
+		root->set_use_render_direct_to_screen(true);
+	}
+
 	int ref_atlas_size = GLOBAL_DEF_RST("rendering/quality/reflections/atlas_size", 2048);
 	ProjectSettings::get_singleton()->set_custom_property_info("rendering/quality/reflections/atlas_size", PropertyInfo(Variant::INT, "rendering/quality/reflections/atlas_size", PROPERTY_HINT_RANGE, "0,8192,1,or_greater")); // next_power_of_2 will return a 0 as min value.
 	int ref_atlas_subdiv = GLOBAL_DEF_RST("rendering/quality/reflections/atlas_subdiv", 8);

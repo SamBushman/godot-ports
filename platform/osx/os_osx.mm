@@ -36,6 +36,7 @@
 #include "core/version_generated.gen.h"
 #include "dir_access_osx.h"
 #include "drivers/gles2/rasterizer_gles2.h"
+#include "drivers/glff/rasterizer_glff.h"
 #include "main/main.h"
 #include "servers/visual/visual_server_raster.h"
 
@@ -1918,7 +1919,11 @@ Error OS_OSX::initialize(const VideoMode &p_desired, int p_video_driver, int p_a
 	bool gl_initialization_error = false;
 
 	while (true) {
-		if (RasterizerGLES2::is_viable() == OK) {
+		if (p_video_driver == VIDEO_DRIVER_GLFF && RasterizerGLFF::is_viable() == OK) {
+			RasterizerGLFF::register_config();
+			RasterizerGLFF::make_current();
+			break;
+		} else if (RasterizerGLES2::is_viable() == OK) {
 			RasterizerGLES2::register_config();
 			RasterizerGLES2::make_current();
 			break;
@@ -3846,6 +3851,9 @@ OS_OSX::OS_OSX() {
 }
 
 bool OS_OSX::_check_internal_feature_support(const String &p_feature) {
+	if (p_feature == "GLFF" && video_driver_index == VIDEO_DRIVER_GLFF) {
+		return true;
+	}
 	return p_feature == "pc";
 }
 
