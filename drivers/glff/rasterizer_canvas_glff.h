@@ -3,9 +3,9 @@
 
 #include "core/rid.h"
 #include "drivers/gles_common/rasterizer_canvas_batcher.h"
+#include "rasterizer_storage_glff.h"
 #include "servers/visual/rasterizer.h"
 
-class RasterizerStorageGLFF;
 class RasterizerSceneGLFF;
 
 // 2D canvas compositor for the GLFF (OpenGL 1.2 fixed-function) driver.
