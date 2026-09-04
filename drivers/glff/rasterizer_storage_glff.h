@@ -46,6 +46,7 @@ public:
 		int data_size;
 		bool active;
 		String path;
+		Ref<Image> cached_image;
 
 		Texture() {
 			width = height = depth = 0;

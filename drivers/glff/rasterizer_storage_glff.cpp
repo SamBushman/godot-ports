@@ -130,6 +130,13 @@ void RasterizerStorageGLFF::texture_set_data(RID p_texture, const Ref<Image> &p_
 	fflush(stderr);
 
 	texture->data_size = data.size();
+	// Cache the uploaded image so texture_get_data() (called by e.g.
+	// default_theme.cpp's flip_icon()) has something real to hand back --
+	// this backend has no glReadPixels-based readback path (and wouldn't
+	// want one for a plain upload-only texture anyway), so the last
+	// image actually given to texture_set_data is exactly what a caller
+	// asking "what does this texture contain" should get.
+	texture->cached_image = img;
 }
 
 void RasterizerStorageGLFF::texture_set_data_partial(RID p_texture, const Ref<Image> &p_image, int src_x, int src_y, int src_w, int src_h, int dst_x, int dst_y, int p_dst_mip, int p_level) {
@@ -152,10 +159,13 @@ void RasterizerStorageGLFF::texture_set_data_partial(RID p_texture, const Ref<Im
 Ref<Image> RasterizerStorageGLFF::texture_get_data(RID p_texture, int p_level) const {
 	Texture *texture = texture_owner.getornull(p_texture);
 	ERR_FAIL_COND_V(!texture, Ref<Image>());
-	// Reading GL texture contents back is not needed by Phase 1 (no editor
-	// thumbnail/viewport-capture path exists yet under GLFF); revisit once
-	// SubViewport-as-texture (glCopyTexSubImage2D fallback, §2) is built.
-	return Ref<Image>();
+	// No glReadPixels-based GPU readback (not needed -- this backend never
+	// renders *to* a texture, only uploads *from* Image data, see §2's
+	// no-FBO design), but callers like default_theme.cpp's flip_icon()
+	// legitimately ask "what does this texture contain" for a texture we
+	// uploaded ourselves -- returning the cached copy from texture_set_data
+	// is exactly correct for that case, not just a stand-in.
+	return texture->cached_image;
 }
 
 void RasterizerStorageGLFF::texture_set_flags(RID p_texture, uint32_t p_flags) {
