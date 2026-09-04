@@ -30,6 +30,8 @@
 
 #include "main.h"
 
+#include <stdio.h>
+
 #include "core/crypto/crypto.h"
 #include "core/input_map.h"
 #include "core/io/file_access_network.h"
@@ -1684,6 +1686,8 @@ static MainTimerSync main_timer_sync;
 
 bool Main::start() {
 	ERR_FAIL_COND_V(!_start_success, false);
+	fprintf(stderr, "GLFF DEBUG: Main::start enter\n");
+	fflush(stderr);
 
 	bool hasicon = false;
 	String doc_tool_path;
@@ -1863,10 +1867,14 @@ bool Main::start() {
 		game_path = GLOBAL_DEF("application/run/main_scene", "");
 	}
 
+	fprintf(stderr, "GLFF DEBUG: Main::start pre-SceneTree-construct\n");
+	fflush(stderr);
 	MainLoop *main_loop = nullptr;
 	if (editor) {
 		main_loop = memnew(SceneTree);
 	};
+	fprintf(stderr, "GLFF DEBUG: Main::start post-SceneTree-construct\n");
+	fflush(stderr);
 	String main_loop_type = GLOBAL_DEF("application/run/main_loop_type", "SceneTree");
 
 	if (test != "") {
