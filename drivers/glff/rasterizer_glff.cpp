@@ -56,6 +56,8 @@ void RasterizerGLFF::begin_frame(double frame_step) {
 }
 
 void RasterizerGLFF::set_current_render_target(RID p_render_target) {
+	fprintf(stderr, "GLFF DEBUG: set_current_render_target enter, valid=%d\n", p_render_target.is_valid());
+	fflush(stderr);
 	// GLFF has no FBO (proposal §2) -- the default framebuffer is always
 	// bound, there is nothing to bind. A valid p_render_target here means
 	// a SubViewport-as-texture request; real support for that (the
