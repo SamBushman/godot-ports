@@ -262,7 +262,7 @@ void finalize_navigation_server() {
 	navigation_2d_server = nullptr;
 }
 
-//#define DEBUG_INIT
+#define DEBUG_INIT
 #ifdef DEBUG_INIT
 #define MAIN_PRINT(m_txt) print_line(m_txt)
 #else
