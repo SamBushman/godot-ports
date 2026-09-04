@@ -2,15 +2,25 @@
 
 #include "core/os/os.h"
 #include "core/project_settings.h"
+#include <stdio.h>
+
+static int glff_texture_create_count = 0;
+static int glff_texture_allocate_count = 0;
+static int glff_texture_set_data_count = 0;
 
 GLuint RasterizerStorageGLFF::system_fbo = 0;
 
 /* TEXTURE */
 
 RID RasterizerStorageGLFF::texture_create() {
+	glff_texture_create_count++;
+	fprintf(stderr, "GLFF DEBUG: texture_create enter #%d\n", glff_texture_create_count);
+	fflush(stderr);
 	Texture *texture = memnew(Texture);
 	ERR_FAIL_COND_V(!texture, RID());
 	glGenTextures(1, &texture->tex_id);
+	fprintf(stderr, "GLFF DEBUG: texture_create exit #%d\n", glff_texture_create_count);
+	fflush(stderr);
 	return texture_owner.make_rid(texture);
 }
 
@@ -51,6 +61,9 @@ static void _get_gl_format(Image::Format p_format, Ref<Image> &r_image, GLenum &
 }
 
 void RasterizerStorageGLFF::texture_allocate(RID p_texture, int p_width, int p_height, int p_depth_3d, Image::Format p_format, VS::TextureType p_type, uint32_t p_flags) {
+	glff_texture_allocate_count++;
+	fprintf(stderr, "GLFF DEBUG: texture_allocate enter #%d (%dx%d fmt=%d)\n", glff_texture_allocate_count, p_width, p_height, (int)p_format);
+	fflush(stderr);
 	Texture *texture = texture_owner.getornull(p_texture);
 	ERR_FAIL_COND(!texture);
 
@@ -63,6 +76,8 @@ void RasterizerStorageGLFF::texture_allocate(RID p_texture, int p_width, int p_h
 	texture->active = true;
 
 	glBindTexture(GL_TEXTURE_2D, texture->tex_id);
+	fprintf(stderr, "GLFF DEBUG: texture_allocate #%d post glBindTexture\n", glff_texture_allocate_count);
+	fflush(stderr);
 
 	GLenum gl_format, gl_internal_format, gl_type;
 	Ref<Image> dummy;
@@ -77,6 +92,8 @@ void RasterizerStorageGLFF::texture_allocate(RID p_texture, int p_width, int p_h
 	// §2) -- CPU-side mip generation is deferred to whichever phase needs
 	// filtered minification; base level alone is enough to compile/display.
 	glTexImage2D(GL_TEXTURE_2D, 0, gl_internal_format, p_width, p_height, 0, gl_format, gl_type, nullptr);
+	fprintf(stderr, "GLFF DEBUG: texture_allocate #%d post glTexImage2D\n", glff_texture_allocate_count);
+	fflush(stderr);
 
 	GLenum wrap = (p_flags & VS::TEXTURE_FLAG_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
@@ -84,9 +101,14 @@ void RasterizerStorageGLFF::texture_allocate(RID p_texture, int p_width, int p_h
 	GLenum filter = (p_flags & VS::TEXTURE_FLAG_FILTER) ? GL_LINEAR : GL_NEAREST;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filter);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filter);
+	fprintf(stderr, "GLFF DEBUG: texture_allocate exit #%d\n", glff_texture_allocate_count);
+	fflush(stderr);
 }
 
 void RasterizerStorageGLFF::texture_set_data(RID p_texture, const Ref<Image> &p_image, int p_level) {
+	glff_texture_set_data_count++;
+	fprintf(stderr, "GLFF DEBUG: texture_set_data enter #%d\n", glff_texture_set_data_count);
+	fflush(stderr);
 	Texture *texture = texture_owner.getornull(p_texture);
 	ERR_FAIL_COND(!texture);
 	ERR_FAIL_COND(p_image.is_null());
@@ -101,7 +123,11 @@ void RasterizerStorageGLFF::texture_set_data(RID p_texture, const Ref<Image> &p_
 
 	PoolVector<uint8_t> data = img->get_data();
 	PoolVector<uint8_t>::Read r = data.read();
+	fprintf(stderr, "GLFF DEBUG: texture_set_data #%d pre glTexImage2D (%dx%d)\n", glff_texture_set_data_count, img->get_width(), img->get_height());
+	fflush(stderr);
 	glTexImage2D(GL_TEXTURE_2D, p_level, gl_internal_format, img->get_width(), img->get_height(), 0, gl_format, gl_type, r.ptr());
+	fprintf(stderr, "GLFF DEBUG: texture_set_data exit #%d\n", glff_texture_set_data_count);
+	fflush(stderr);
 
 	texture->data_size = data.size();
 }
