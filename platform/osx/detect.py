@@ -1,4 +1,5 @@
 import os
+import platform
 import sys
 from methods import detect_darwin_sdk_path, get_compiler_version, is_vanilla_clang
 
@@ -42,6 +43,26 @@ def get_flags():
     return []
 
 
+def _detect_host_osx_version(arch):
+    # Only meaningful for a native build actually running on the target
+    # Mac (can_build() only gets here with sys.platform == "darwin" when
+    # OSXCROSS_ROOT isn't set) -- reads the real running OS version instead
+    # of guessing from CPU architecture, which broke silently on hardware
+    # that doesn't match the old per-arch assumption (a Tiger-only PPC
+    # machine, previously defaulted to targeting 10.5+ just because it's
+    # ppc, pulling in 10.5-only headers that don't exist on that SDK).
+    fallback = "10.5" if arch == "ppc" else "10.7"
+    try:
+        release = platform.mac_ver()[0]
+        parts = release.split(".")
+        if len(parts) >= 2 and parts[0] and parts[1]:
+            return parts[0] + "." + parts[1]
+    except Exception:
+        pass
+    print("Could not auto-detect the host OS X version, falling back to " + fallback + ".")
+    return fallback
+
+
 def configure(env):
     ## Build type
 
@@ -81,10 +102,19 @@ def configure(env):
     if "OSXCROSS_ROOT" in os.environ:
         env["osxcross"] = True
 
-    osxver = "10.5" if env["arch"] == "ppc" else "10.7"
     if "osx_version" in env:
         osxver = env["osx_version"]
-    
+    elif "OSXCROSS_ROOT" not in os.environ:
+        # Native build, not cross-compiling: auto-detect the real host OS
+        # version as the default rather than requiring osx_version to be
+        # passed explicitly every time.
+        osxver = _detect_host_osx_version(env["arch"])
+    else:
+        # Cross-compiling with no explicit target given -- can't read a
+        # meaningful "host" version (the host isn't the target), so fall
+        # back to the previous per-arch guess.
+        osxver = "10.5" if env["arch"] == "ppc" else "10.7"
+
     if env["arch"] == "arm64":
         print("Building for macOS 11.0+, platform arm64.")
         env.Append(ASFLAGS=["-arch", "arm64", "-mmacosx-version-min=11.0"])
