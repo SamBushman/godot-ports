@@ -208,6 +208,11 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					glTexCoordPointer(2, GL_FLOAT, 0, uvs);
 					glDisableClientState(GL_COLOR_ARRAY);
 					glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+					if (tex && glff_rect_textured <= 5) {
+						GLenum err = glGetError();
+						fprintf(stderr, "GLFF DEBUG: textured RECT #%d post-draw glGetError=0x%x uv=(%.3f,%.3f)-(%.3f,%.3f)\n", glff_rect_textured, err, u0, v0, u1, v1);
+						fflush(stderr);
+					}
 				} break;
 
 				case Item::Command::TYPE_NINEPATCH: {
