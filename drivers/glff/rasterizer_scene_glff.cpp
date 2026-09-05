@@ -69,18 +69,34 @@ static GLenum _primitive_to_gl(VS::PrimitiveType p_primitive) {
 // guaranteed minimum) driven directly off RasterizerStorageGLFF::Light's
 // already-real color/type/param storage.
 void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const CameraMatrix &p_cam_projection, const int p_eye, bool p_cam_ortogonal, InstanceBase **p_cull_result, int p_cull_count, RID *p_light_cull_result, int p_light_cull_count, RID *p_reflection_probe_cull_result, int p_reflection_probe_cull_count, RID p_environment, RID p_shadow_atlas, RID p_reflection_atlas, RID p_reflection_probe, int p_reflection_probe_pass) {
-	Color bg_color(0, 0, 0, 1);
 	Color ambient_color(0, 0, 0, 1);
-	if (p_environment.is_valid()) {
-		Environment *env = environment_owner.getornull(p_environment);
-		if (env) {
-			bg_color = env->bg_color;
-			ambient_color = Color(env->ambient_color.r * env->ambient_energy, env->ambient_color.g * env->ambient_energy, env->ambient_color.b * env->ambient_energy, 1.0);
-		}
+	Environment *env = p_environment.is_valid() ? environment_owner.getornull(p_environment) : nullptr;
+	if (env) {
+		ambient_color = Color(env->ambient_color.r * env->ambient_energy, env->ambient_color.g * env->ambient_energy, env->ambient_color.b * env->ambient_energy, 1.0);
 	}
 
-	glClearColor(bg_color.r, bg_color.g, bg_color.b, 1.0);
-	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	// Only explicitly re-clear the color buffer here when a real Environment
+	// requests a specific solid background (ENV_BG_COLOR/CANVAS/COLOR_SKY).
+	// Every other case (no Environment at all -- true for the editor's own
+	// 3D viewport camera and any scene without a WorldEnvironment node, and
+	// also VS::ENV_BG_CLEAR_COLOR/ENV_BG_SKY, sky being dropped/degraded to
+	// clear-color per this backend's design) must NOT touch the color
+	// buffer: VisualServerViewport::_draw_viewport() (servers/visual/
+	// visual_server_viewport.cpp:99) already called clear_render_target()
+	// with the correct default (the "rendering/environment/default_clear_color"
+	// project setting, a light grey, not black) before this function runs.
+	// An earlier version of this code unconditionally re-cleared to a
+	// hardcoded Color(0,0,0,1) fallback whenever no Environment was set,
+	// stomping that correct clear with solid black -- exactly the case hit
+	// by the editor's own camera, which has no Environment (godot-ports#28).
+	// Matches GLES2's identical precedence (rasterizer_scene_gles2.cpp,
+	// around its own "clear color" comment).
+	if (env && (env->bg_mode == VS::ENV_BG_COLOR || env->bg_mode == VS::ENV_BG_CANVAS || env->bg_mode == VS::ENV_BG_COLOR_SKY)) {
+		glClearColor(env->bg_color.r, env->bg_color.g, env->bg_color.b, 1.0);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	} else {
+		glClear(GL_DEPTH_BUFFER_BIT);
+	}
 
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LEQUAL);
