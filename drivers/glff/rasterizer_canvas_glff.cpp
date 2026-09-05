@@ -2,10 +2,6 @@
 
 #include "core/os/os.h"
 #include "rasterizer_storage_glff.h"
-#include <stdio.h>
-
-static int glff_rect_total = 0;
-static int glff_rect_textured = 0;
 
 void RasterizerCanvasGLFF::canvas_begin() {
 	// A plain glLoadIdentity() here left the projection matrix mapping only
@@ -110,8 +106,6 @@ void RasterizerCanvasGLFF::canvas_render_items_implementation(Item *p_item_list,
 	}
 
 	glDisable(GL_SCISSOR_TEST);
-	fprintf(stderr, "GLFF DEBUG: canvas_render_items_implementation done, rects total=%d textured=%d\n", glff_rect_total, glff_rect_textured);
-	fflush(stderr);
 }
 
 void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, RasterizerStorageGLFF::Material *p_material) {
@@ -161,18 +155,6 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					_load_transform2d_gl(batch.item->final_transform * extra_matrix);
 
 					RasterizerStorageGLFF::Texture *tex = r->texture.is_valid() ? storage->texture_owner.getornull(r->texture) : nullptr;
-					glff_rect_total++;
-					if (tex) {
-						glff_rect_textured++;
-						if (glff_rect_textured <= 5) {
-							fprintf(stderr, "GLFF DEBUG: textured RECT #%d tex_id=%u %dx%d flags=%d rect=(%.1f,%.1f,%.1f,%.1f) modulate=(%.2f,%.2f,%.2f,%.2f) has_data=%d\n",
-									glff_rect_textured, tex->tex_id, tex->width, tex->height, r->flags,
-									r->rect.position.x, r->rect.position.y, r->rect.size.width, r->rect.size.height,
-									r->modulate.r, r->modulate.g, r->modulate.b, r->modulate.a,
-									tex->cached_image.is_valid());
-							fflush(stderr);
-						}
-					}
 					if (tex) {
 						glEnable(GL_TEXTURE_2D);
 						glBindTexture(GL_TEXTURE_2D, tex->tex_id);
@@ -216,11 +198,6 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					glTexCoordPointer(2, GL_FLOAT, 0, uvs);
 					glDisableClientState(GL_COLOR_ARRAY);
 					glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
-					if (tex && glff_rect_textured <= 5) {
-						GLenum err = glGetError();
-						fprintf(stderr, "GLFF DEBUG: textured RECT #%d post-draw glGetError=0x%x uv=(%.3f,%.3f)-(%.3f,%.3f)\n", glff_rect_textured, err, u0, v0, u1, v1);
-						fflush(stderr);
-					}
 				} break;
 
 				case Item::Command::TYPE_NINEPATCH: {
