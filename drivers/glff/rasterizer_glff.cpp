@@ -62,6 +62,9 @@ void RasterizerGLFF::set_current_render_target(RID p_render_target) {
 	// own 3D panel, camera previews, minimaps) work at all; see the
 	// RenderTarget comment in rasterizer_storage_glff.h for the full
 	// reasoning (godot-ports#28).
+	Size2 real_window_size = OS::get_singleton()->get_window_size();
+	fprintf(stderr, "GLFF DEBUG: real window size w=%d h=%d\n", (int)real_window_size.width, (int)real_window_size.height);
+	fflush(stderr);
 	if (current_render_target.is_valid()) {
 		fprintf(stderr, "GLFF DEBUG: capturing prev target %s\n", current_render_target.get_id() != 0 ? "valid" : "invalid");
 		fflush(stderr);
