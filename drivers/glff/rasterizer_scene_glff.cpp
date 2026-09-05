@@ -1,6 +1,7 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
+#include <stdio.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
 // confirms elements[row] is a ROW of the basis, i.e. elements[row].x/y/z
@@ -337,12 +338,36 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 
 			GLenum gl_primitive = _primitive_to_gl(surface->primitive);
 
+			bool trace_this = (surface->vertex_count == 384);
+			if (trace_this) {
+				while (glGetError() != GL_NO_ERROR) {
+				}
+				GLboolean cull_en = glIsEnabled(GL_CULL_FACE);
+				GLboolean depth_en = glIsEnabled(GL_DEPTH_TEST);
+				GLint cull_mode_gl = 0;
+				glGetIntegerv(GL_CULL_FACE_MODE, &cull_mode_gl);
+				GLfloat mv[16];
+				glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+				static long frame_counter = 0;
+				frame_counter++;
+				fprintf(stderr, "GLFF DEBUG: gizmo-arrow frame=%ld inst=%p cull_en=%d cull_mode=0x%x depth_en=%d mv_diag=(%.4f,%.4f,%.4f) mv_origin=(%.3f,%.3f,%.3f)\n",
+						frame_counter, (void *)instance, (int)cull_en, cull_mode_gl, (int)depth_en,
+						mv[0], mv[5], mv[10], mv[12], mv[13], mv[14]);
+				fflush(stderr);
+			}
+
 			if (surface->index_count > 0) {
 				GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
 				PoolVector<uint8_t>::Read ir = surface->index_array.read();
 				glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
 			} else {
 				glDrawArrays(gl_primitive, 0, surface->vertex_count);
+			}
+
+			if (trace_this) {
+				GLenum err = glGetError();
+				fprintf(stderr, "GLFF DEBUG: gizmo-arrow post-draw err=0x%x\n", (unsigned)err);
+				fflush(stderr);
 			}
 		}
 
