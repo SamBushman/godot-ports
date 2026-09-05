@@ -1,7 +1,6 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
-#include <stdio.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
 // confirms elements[row] is a ROW of the basis, i.e. elements[row].x/y/z
@@ -216,29 +215,6 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			}
 			RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? storage->shader_owner.getornull(mat->shader) : nullptr;
 
-			{
-				static unsigned seen_mats[128];
-				static int seen_count = 0;
-				unsigned this_id = mat_rid.get_id();
-				bool already_seen = false;
-				for (int si = 0; si < seen_count; si++) {
-					if (seen_mats[si] == this_id) {
-						already_seen = true;
-						break;
-					}
-				}
-				if (!already_seen && seen_count < 128 && surface->vertex_count < 2000) {
-					seen_mats[seen_count++] = this_id;
-					fprintf(stderr, "GLFF DEBUG: small-mesh surface mat_rid=%u vcount=%d shader=%p depth_test_disabled=%d cull_mode=%d unshaded=%d albedo=(%.2f,%.2f,%.2f,%.2f)\n",
-							this_id, surface->vertex_count, (void *)shader,
-							shader ? (int)shader->depth_test_disabled : -1,
-							shader ? (int)shader->cull_mode : -1,
-							shader ? (int)shader->unshaded : -1,
-							albedo.r, albedo.g, albedo.b, albedo.a);
-					fflush(stderr);
-				}
-			}
-
 			glColor4f(albedo.r, albedo.g, albedo.b, albedo.a);
 			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, albedo.a };
 			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
@@ -269,11 +245,27 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			}
 
 			// Per-material cull mode override (default is the GL_BACK set
-			// once per-frame above).
+			// once per-frame above). Unshaded surfaces (editor gizmos,
+			// axis lines -- always unshaded, see surface_unshaded below)
+			// also skip backface culling by default, regardless of
+			// cull_mode: this fixed-function backend has NO CHOICE but to
+			// rely on hardware glFrontFace/glCullFace for culling (unlike
+			// GLES2/GLES3, which compute front/back-facing per-fragment
+			// in a shader, decoupled from hardware winding state) -- so
+			// GLFF is the first backend where a real winding mismatch
+			// between imported glTF content (reordered to match Godot's
+			// CW-front convention at import time) and procedurally-
+			// authored SurfaceTool geometry (gizmos, never reordered,
+			// possibly GL's native CCW-front) actually matters. This
+			// exactly matches the reported symptom (godot-ports#28): the
+			// move-gizmo's per-axis cone abruptly vanishing/reappearing
+			// as the camera rotates, with no visible size change --
+			// classic binary backface-cull behavior, not a scale/culling-
+			// frustum/depth issue (all independently ruled out first).
 			if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
 				glEnable(GL_CULL_FACE);
 				glCullFace(GL_FRONT);
-			} else if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) {
+			} else if ((shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) || (shader && shader->unshaded)) {
 				glDisable(GL_CULL_FACE);
 			} else {
 				glEnable(GL_CULL_FACE);
