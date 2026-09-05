@@ -8,8 +8,15 @@ static int glff_rect_total = 0;
 static int glff_rect_textured = 0;
 
 void RasterizerCanvasGLFF::canvas_begin() {
+	// A plain glLoadIdentity() here left the projection matrix mapping only
+	// NDC [-1,1] -- real CanvasItem geometry is in pixel coordinates (e.g.
+	// a 16x16 icon at (625,5)), so it was being clipped away entirely, not
+	// just misplaced. This maps window pixel space to NDC directly, with Y
+	// flipped since screen space grows downward and GL NDC grows upward.
+	Size2 window_size = OS::get_singleton()->get_window_size();
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
+	glOrtho(0, window_size.width, window_size.height, 0, -1, 1);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadIdentity();
 
