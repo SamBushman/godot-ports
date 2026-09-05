@@ -299,6 +299,11 @@ bool RasterizerSceneGLFF::free(RID p_rid) {
 }
 
 void RasterizerSceneGLFF::initialize() {
+	// Godot's mesh winding convention is clockwise-front (matching GLES2/
+	// GLES3's own glFrontFace(GL_CW) in their initialize()), not GL's
+	// default CCW -- without this, render_scene()'s GL_CULL_FACE/GL_BACK
+	// setup culls the real front faces and shows back faces instead.
+	glFrontFace(GL_CW);
 }
 
 RasterizerSceneGLFF::RasterizerSceneGLFF() {
