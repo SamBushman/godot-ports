@@ -191,6 +191,12 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			RasterizerStorageGLFF::Material *mat = storage->material_owner.getornull(mat_rid);
 			Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
 			RasterizerStorageGLFF::Texture *tex = (mat && mat->albedo_texture.is_valid()) ? storage->texture_owner.getornull(mat->albedo_texture) : nullptr;
+			if (tex) {
+				// resolve ViewportTexture proxies (e.g. a SubViewport used as
+				// a material's albedo texture) -- see the Texture::proxy
+				// comment in rasterizer_storage_glff.h (godot-ports#28).
+				tex = tex->get_ptr();
+			}
 			RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? storage->shader_owner.getornull(mat->shader) : nullptr;
 
 			glColor4f(albedo.r, albedo.g, albedo.b, albedo.a);

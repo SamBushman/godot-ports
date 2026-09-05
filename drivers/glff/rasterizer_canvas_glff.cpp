@@ -2,7 +2,6 @@
 
 #include "core/os/os.h"
 #include "rasterizer_storage_glff.h"
-#include <stdio.h>
 
 void RasterizerCanvasGLFF::canvas_begin() {
 	// A plain glLoadIdentity() here left the projection matrix mapping only
@@ -156,39 +155,21 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					_load_transform2d_gl(batch.item->final_transform * extra_matrix);
 
 					RasterizerStorageGLFF::Texture *tex = r->texture.is_valid() ? storage->texture_owner.getornull(r->texture) : nullptr;
+					// ViewportContainer (and any other SubViewport-as-texture
+					// consumer) hands out a separate "proxy" Texture RID (see
+					// the Texture::proxy comment in rasterizer_storage_glff.h)
+					// -- resolve to the real render target texture before
+					// reading any of its fields, same as every other Godot
+					// GL backend (godot-ports#28).
+					if (tex) {
+						tex = tex->get_ptr();
+					}
 					if (tex) {
 						glEnable(GL_TEXTURE_2D);
 						glBindTexture(GL_TEXTURE_2D, tex->tex_id);
 						glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 					} else {
 						glDisable(GL_TEXTURE_2D);
-					}
-					{
-						// Log only the FIRST time each distinct tex_id is
-						// seen drawn via TYPE_RECT -- avoids per-frame spam
-						// while still revealing whether tex_id 913/126 (the
-						// two render-target textures currently being
-						// captured successfully every frame, per
-						// copy_to_texture tracing) ever actually get drawn
-						// through this path at all.
-						static unsigned seen_ids[256];
-						static int seen_count = 0;
-						unsigned this_id = tex ? (unsigned)tex->tex_id : 0;
-						bool already_seen = false;
-						for (int si = 0; si < seen_count; si++) {
-							if (seen_ids[si] == this_id) {
-								already_seen = true;
-								break;
-							}
-						}
-						if (!already_seen && seen_count < 256) {
-							seen_ids[seen_count++] = this_id;
-							fprintf(stderr, "GLFF DEBUG: TYPE_RECT first-seen tex_id=%u is_rt=%d w=%u h=%u gl_alloc=%ux%u region_flag=%d rect=(%.1f,%.1f,%.1f,%.1f)\n",
-									this_id, tex ? (int)tex->is_render_target : -1,
-									tex ? tex->width : 0, tex ? tex->height : 0, tex ? tex->gl_alloc_width : 0, tex ? tex->gl_alloc_height : 0,
-									(int)((r->flags & CANVAS_RECT_REGION) != 0), r->rect.position.x, r->rect.position.y, r->rect.size.width, r->rect.size.height);
-							fflush(stderr);
-						}
 					}
 
 					Rect2 src = (r->flags & CANVAS_RECT_REGION) ? r->source : Rect2(0, 0, 1, 1);
@@ -261,6 +242,9 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 
 					RasterizerStorageGLFF::Texture *tex = np->texture.is_valid() ? storage->texture_owner.getornull(np->texture) : nullptr;
 					if (tex) {
+						tex = tex->get_ptr(); // resolve proxies, see TYPE_RECT above
+					}
+					if (tex) {
 						glEnable(GL_TEXTURE_2D);
 						glBindTexture(GL_TEXTURE_2D, tex->tex_id);
 						glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
@@ -294,6 +278,9 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					_load_transform2d_gl(batch.item->final_transform * extra_matrix);
 
 					RasterizerStorageGLFF::Texture *tex = mr->texture.is_valid() ? storage->texture_owner.getornull(mr->texture) : nullptr;
+					if (tex) {
+						tex = tex->get_ptr(); // resolve proxies, see TYPE_RECT above
+					}
 					if (tex) {
 						glEnable(GL_TEXTURE_2D);
 						glBindTexture(GL_TEXTURE_2D, tex->tex_id);
@@ -395,6 +382,9 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 
 					RasterizerStorageGLFF::Texture *tex = prim->texture.is_valid() ? storage->texture_owner.getornull(prim->texture) : nullptr;
 					if (tex) {
+						tex = tex->get_ptr(); // resolve proxies, see TYPE_RECT above
+					}
+					if (tex) {
 						glEnable(GL_TEXTURE_2D);
 						glBindTexture(GL_TEXTURE_2D, tex->tex_id);
 						glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
@@ -431,6 +421,9 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					_load_transform2d_gl(batch.item->final_transform * extra_matrix);
 
 					RasterizerStorageGLFF::Texture *tex = poly->texture.is_valid() ? storage->texture_owner.getornull(poly->texture) : nullptr;
+					if (tex) {
+						tex = tex->get_ptr(); // resolve proxies, see TYPE_RECT above
+					}
 					if (tex) {
 						glEnable(GL_TEXTURE_2D);
 						glBindTexture(GL_TEXTURE_2D, tex->tex_id);

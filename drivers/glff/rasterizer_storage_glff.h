@@ -3,7 +3,6 @@
 
 #include "core/rid.h"
 #include "servers/visual/rasterizer.h"
-#include <stdio.h>
 
 // Same platform GL header indirection GLES2 already uses successfully on
 // this hardware (drivers/gles2/shader_gles2.h) -- platform_config.h picks
@@ -80,6 +79,19 @@ public:
 		// be POT).
 		uint32_t gl_alloc_width, gl_alloc_height;
 
+		// ViewportTexture (scene/main/viewport.cpp) never samples the
+		// render target's own Texture directly -- it hands out a separate,
+		// otherwise-empty "proxy" Texture (its own RID, from a bare
+		// texture_create()) and calls texture_set_proxy(proxy, real_rid)
+		// to link them. Every consumer (ViewportContainer included, the
+		// direct cause of godot-ports#28's blank editor 3D viewport) reads
+		// tex_id/width/height/is_render_target/etc. from that PROXY, never
+		// the real texture, so this indirection must be resolved before
+		// any of those fields are used for real rendering -- same
+		// established pattern as drivers/gles2's Texture::get_ptr().
+		Texture *proxy;
+		Set<Texture *> proxy_owners;
+
 		Texture() {
 			width = height = depth = 0;
 			flags = VS::TEXTURE_FLAGS_DEFAULT;
@@ -90,6 +102,23 @@ public:
 			active = false;
 			is_render_target = false;
 			gl_alloc_width = gl_alloc_height = 0;
+			proxy = nullptr;
+		}
+
+		_ALWAYS_INLINE_ Texture *get_ptr() {
+			if (proxy) {
+				return proxy; // Only one level of indirection -- proxies never chain.
+			}
+			return this;
+		}
+
+		~Texture() {
+			for (Set<Texture *>::Element *E = proxy_owners.front(); E; E = E->next()) {
+				E->get()->proxy = nullptr;
+			}
+			if (proxy) {
+				proxy->proxy_owners.erase(this);
+			}
 		}
 	};
 
@@ -127,7 +156,28 @@ public:
 	virtual void texture_set_detect_srgb_callback(RID p_texture, VisualServer::TextureDetectCallback p_callback, void *p_userdata) {}
 	virtual void texture_set_detect_normal_callback(RID p_texture, VisualServer::TextureDetectCallback p_callback, void *p_userdata) {}
 	virtual void textures_keep_original(bool p_enable) {}
-	virtual void texture_set_proxy(RID p_proxy, RID p_base) {}
+	// NOTE: despite the (p_proxy, p_base) parameter names inherited from
+	// the base VisualServer API, the real semantics (matching every other
+	// backend, see drivers/gles2/rasterizer_storage_gles2.cpp) are
+	// "p_texture->proxy = p_base" -- i.e. whichever RID is p_proxy here IS
+	// the proxy object being configured, not the thing to fetch. Callers
+	// always pass their OWN proxy RID first (see
+	// scene/main/viewport.cpp:80's texture_set_proxy(proxy, vp->texture_rid)).
+	virtual void texture_set_proxy(RID p_proxy, RID p_base) {
+		Texture *proxy_tex = texture_owner.getornull(p_proxy);
+		ERR_FAIL_COND(!proxy_tex);
+		if (proxy_tex->proxy) {
+			proxy_tex->proxy->proxy_owners.erase(proxy_tex);
+			proxy_tex->proxy = nullptr;
+		}
+		if (p_base.is_valid()) {
+			Texture *base_tex = texture_owner.getornull(p_base);
+			ERR_FAIL_COND(!base_tex);
+			ERR_FAIL_COND(base_tex == proxy_tex);
+			base_tex->proxy_owners.insert(proxy_tex);
+			proxy_tex->proxy = base_tex;
+		}
+	}
 	virtual Size2 texture_size_with_proxy(RID p_texture) const { return Size2(texture_get_width(p_texture), texture_get_height(p_texture)); }
 	virtual void texture_set_force_redraw_if_visible(RID p_texture, bool p_enable) {}
 
@@ -763,9 +813,6 @@ public:
 				tex->gl_alloc_width = pot_w;
 				tex->gl_alloc_height = pot_h;
 			}
-			fprintf(stderr, "GLFF DEBUG: render_target_set_size rid=%p w=%d h=%d pot=%dx%d tex=%p tex_id=%u is_rt=%d\n",
-					(void *)rt, p_width, p_height, pot_w, pot_h, (void *)tex, tex ? (unsigned)tex->tex_id : 0, tex ? (int)tex->is_render_target : -1);
-			fflush(stderr);
 		}
 	}
 	// Called by RasterizerGLFF::set_current_render_target() right before
@@ -794,10 +841,6 @@ public:
 		// populated -- see the gl_alloc_width/height comment on Texture
 		// above for why the underlying storage may be larger.
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, rt->width, rt->height);
-		GLenum copy_err = glGetError();
-		fprintf(stderr, "GLFF DEBUG: copy_to_texture rid=%p tex_id=%u w=%d h=%d gl_alloc=%ux%u err=0x%x\n",
-				(void *)rt, (unsigned)tex->tex_id, rt->width, rt->height, tex->gl_alloc_width, tex->gl_alloc_height, (unsigned)copy_err);
-		fflush(stderr);
 	}
 	virtual RID render_target_get_texture(RID p_render_target) const {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
