@@ -163,12 +163,29 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					} else {
 						glDisable(GL_TEXTURE_2D);
 					}
-					if (tex && tex->is_render_target) {
-						static int rt_draw_count = 0;
-						if (rt_draw_count < 20) {
-							rt_draw_count++;
-							fprintf(stderr, "GLFF DEBUG: TYPE_RECT drawing render-target tex tex_id=%u w=%u h=%u gl_alloc=%ux%u region_flag=%d rect=(%.1f,%.1f,%.1f,%.1f)\n",
-									(unsigned)tex->tex_id, tex->width, tex->height, tex->gl_alloc_width, tex->gl_alloc_height,
+					{
+						// Log only the FIRST time each distinct tex_id is
+						// seen drawn via TYPE_RECT -- avoids per-frame spam
+						// while still revealing whether tex_id 913/126 (the
+						// two render-target textures currently being
+						// captured successfully every frame, per
+						// copy_to_texture tracing) ever actually get drawn
+						// through this path at all.
+						static unsigned seen_ids[256];
+						static int seen_count = 0;
+						unsigned this_id = tex ? (unsigned)tex->tex_id : 0;
+						bool already_seen = false;
+						for (int si = 0; si < seen_count; si++) {
+							if (seen_ids[si] == this_id) {
+								already_seen = true;
+								break;
+							}
+						}
+						if (!already_seen && seen_count < 256) {
+							seen_ids[seen_count++] = this_id;
+							fprintf(stderr, "GLFF DEBUG: TYPE_RECT first-seen tex_id=%u is_rt=%d w=%u h=%u gl_alloc=%ux%u region_flag=%d rect=(%.1f,%.1f,%.1f,%.1f)\n",
+									this_id, tex ? (int)tex->is_render_target : -1,
+									tex ? tex->width : 0, tex ? tex->height : 0, tex ? tex->gl_alloc_width : 0, tex ? tex->gl_alloc_height : 0,
 									(int)((r->flags & CANVAS_RECT_REGION) != 0), r->rect.position.x, r->rect.position.y, r->rect.size.width, r->rect.size.height);
 							fflush(stderr);
 						}
