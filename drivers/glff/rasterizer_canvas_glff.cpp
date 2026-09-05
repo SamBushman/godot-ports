@@ -158,10 +158,11 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					if (tex) {
 						glff_rect_textured++;
 						if (glff_rect_textured <= 5) {
-							fprintf(stderr, "GLFF DEBUG: textured RECT #%d tex_id=%u %dx%d flags=%d rect=(%.1f,%.1f,%.1f,%.1f) modulate=(%.2f,%.2f,%.2f,%.2f)\n",
+							fprintf(stderr, "GLFF DEBUG: textured RECT #%d tex_id=%u %dx%d flags=%d rect=(%.1f,%.1f,%.1f,%.1f) modulate=(%.2f,%.2f,%.2f,%.2f) has_data=%d\n",
 									glff_rect_textured, tex->tex_id, tex->width, tex->height, r->flags,
 									r->rect.position.x, r->rect.position.y, r->rect.size.width, r->rect.size.height,
-									r->modulate.r, r->modulate.g, r->modulate.b, r->modulate.a);
+									r->modulate.r, r->modulate.g, r->modulate.b, r->modulate.a,
+									tex->cached_image.is_valid());
 							fflush(stderr);
 						}
 					}
