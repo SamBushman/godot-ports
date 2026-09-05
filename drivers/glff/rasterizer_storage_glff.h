@@ -47,6 +47,18 @@ public:
 		bool active;
 		String path;
 		Ref<Image> cached_image;
+		// True only for the Texture render_target_create() creates to back
+		// a RenderTarget. glCopyTexSubImage2D pulls straight from the
+		// screen framebuffer (GL's bottom-left-origin convention) into
+		// texture row 0, which is the OPPOSITE of a normally-loaded image
+		// texture's row 0 (top of the image, per how Image/PNG data is
+		// uploaded) -- sampling it with ordinary top-down V coordinates
+		// would show render targets (ViewportContainer, the editor's own
+		// 3D panel) upside down. Canvas RECT drawing flips V specifically
+		// for textures flagged this way instead of flipping the render
+		// pass itself, so the already-verified-correct main-viewport
+		// rendering stays completely untouched (godot-ports#28).
+		bool is_render_target;
 
 		Texture() {
 			width = height = depth = 0;
@@ -56,6 +68,7 @@ public:
 			tex_id = 0;
 			data_size = 0;
 			active = false;
+			is_render_target = false;
 		}
 	};
 
@@ -662,12 +675,29 @@ public:
 	virtual int particles_get_draw_passes(RID p_particles) const { return 0; }
 	virtual RID particles_get_draw_pass_mesh(RID p_particles, int p_pass) const { return RID(); }
 
-	/* RENDER TARGET -- minimal real tracking (size only). GLFF has no
-	   FBO (see proposal §2), so a "render target" here is not a real
-	   off-screen texture; the main viewport is forced render-direct-to-
-	   screen (§4.3/§4.4a) and never calls into most of this. SubViewport-
-	   as-texture support (glCopyTexSubImage2D fallback, §2) is deferred
-	   to whichever phase needs it -- not required to compile Phase 1. */
+	/* RENDER TARGET. GLFF has no FBO (see proposal §2), so there is no
+	   real off-screen surface to render into -- the main viewport is
+	   forced render-direct-to-screen (§4.3/§4.4a) and draws straight to
+	   the window backbuffer, never touching any of this. But a
+	   SubViewport used purely *as a texture* (ViewportContainer, camera
+	   previews, minimaps, and the editor's own 3D panel -- confirmed via
+	   SpatialEditorViewport wrapping a real Viewport in a
+	   ViewportContainer) still needs SOMETHING real behind
+	   render_target_get_texture(), or every consumer draws an untextured
+	   (blank/white) quad -- this was the actual cause of godot-ports#28's
+	   blank editor 3D viewport.
+	   Fix: every "render target" here IS a real Texture (reusing
+	   texture_create()/texture_allocate()'s existing GL_RGBA8 storage
+	   allocation, not new code); RasterizerGLFF::set_current_render_target()
+	   captures whatever was just drawn into the shared window backbuffer's
+	   (0,0)-origin region via glCopyTexSubImage2D into that texture right
+	   before the NEXT render target (or the final on-screen pass)
+	   overwrites the same physical pixels -- see render_target_copy_to_texture()
+	   below and the call site in rasterizer_glff.cpp. This works because
+	   every render target already draws at glViewport(0,0,width,height)
+	   (unchanged behavior), so capturing "whatever's currently at the
+	   window's origin, sized to this target" is always exactly this
+	   target's own just-rendered content, never another target's. */
 
 	struct RenderTarget : public RID_Data {
 		int width, height;
@@ -678,14 +708,43 @@ public:
 	virtual RID render_target_create() {
 		RenderTarget *rt = memnew(RenderTarget);
 		rt->width = rt->height = 0;
+		rt->texture = texture_create();
+		Texture *tex = texture_owner.getornull(rt->texture);
+		if (tex) {
+			tex->active = true;
+			tex->is_render_target = true;
+		}
 		return render_target_owner.make_rid(rt);
 	}
 	virtual void render_target_set_position(RID p_render_target, int p_x, int p_y) {}
 	virtual void render_target_set_size(RID p_render_target, int p_width, int p_height) {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
 		ERR_FAIL_COND(!rt);
+		if (rt->width == p_width && rt->height == p_height) {
+			return;
+		}
 		rt->width = p_width;
 		rt->height = p_height;
+		if (p_width > 0 && p_height > 0) {
+			texture_allocate(rt->texture, p_width, p_height, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
+		}
+	}
+	// Called by RasterizerGLFF::set_current_render_target() right before
+	// this target's shared backbuffer region gets overwritten by whatever
+	// renders next -- see the RenderTarget comment above for why this is
+	// the only correct place to do this capture under strict-GL-1.2's
+	// no-FBO floor.
+	void render_target_copy_to_texture(RID p_render_target) {
+		RenderTarget *rt = render_target_owner.getornull(p_render_target);
+		if (!rt || rt->width <= 0 || rt->height <= 0) {
+			return;
+		}
+		Texture *tex = texture_owner.getornull(rt->texture);
+		if (!tex) {
+			return;
+		}
+		glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, rt->width, rt->height);
 	}
 	virtual RID render_target_get_texture(RID p_render_target) const {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);

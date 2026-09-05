@@ -179,6 +179,12 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					if (r->flags & CANVAS_RECT_FLIP_V) {
 						SWAP(v0, v1);
 					}
+					if (tex && tex->is_render_target) {
+						// See the is_render_target comment in
+						// rasterizer_storage_glff.h -- composes correctly
+						// with the FLIP_V case above (two swaps cancel out).
+						SWAP(v0, v1);
+					}
 
 					Color c = r->modulate * batch.item->final_modulate;
 					glColor4f(c.r, c.g, c.b, c.a);

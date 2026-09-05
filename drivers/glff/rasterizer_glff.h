@@ -16,6 +16,12 @@ class RasterizerGLFF : public Rasterizer {
 	RasterizerStorageGLFF *storage;
 	RasterizerCanvasGLFF *canvas;
 	RasterizerSceneGLFF *scene;
+	// Tracks whichever render target is currently being drawn into, so
+	// set_current_render_target() can capture it (glCopyTexSubImage2D)
+	// right before switching away -- see the RenderTarget comment in
+	// rasterizer_storage_glff.h for why this is needed at all under
+	// strict-GL-1.2's no-FBO floor.
+	RID current_render_target;
 
 public:
 	virtual RasterizerStorage *get_storage();

@@ -52,12 +52,20 @@ void RasterizerGLFF::begin_frame(double frame_step) {
 
 void RasterizerGLFF::set_current_render_target(RID p_render_target) {
 	// GLFF has no FBO (proposal §2) -- the default framebuffer is always
-	// bound, there is nothing to bind. A valid p_render_target here means
-	// a SubViewport-as-texture request; real support for that (the
-	// glCopyTexSubImage2D backbuffer-copy fallback the proposal already
-	// designed for) isn't built yet -- just size the viewport correctly so
-	// the common single-main-viewport case (render_direct_to_screen
-	// forced on, see scene_tree.cpp) works.
+	// bound, so every render target actually draws straight into the real
+	// window backbuffer at glViewport(0,0,width,height). Before switching
+	// to a DIFFERENT target (or back to the main screen) and overwriting
+	// that same physical region, capture whatever the PREVIOUS target just
+	// drew into its own real texture via glCopyTexSubImage2D -- this is
+	// what makes SubViewport-as-texture (ViewportContainer, the editor's
+	// own 3D panel, camera previews, minimaps) work at all; see the
+	// RenderTarget comment in rasterizer_storage_glff.h for the full
+	// reasoning (godot-ports#28).
+	if (current_render_target.is_valid()) {
+		storage->render_target_copy_to_texture(current_render_target);
+	}
+	current_render_target = p_render_target;
+
 	if (p_render_target.is_valid()) {
 		RasterizerStorageGLFF::RenderTarget *rt = storage->render_target_owner.getornull(p_render_target);
 		if (rt) {
