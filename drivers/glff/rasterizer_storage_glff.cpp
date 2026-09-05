@@ -1,7 +1,9 @@
 #include "rasterizer_storage_glff.h"
 
+#include "core/math/math_funcs.h"
 #include "core/os/os.h"
 #include "core/project_settings.h"
+#include "servers/visual_server.h"
 
 GLuint RasterizerStorageGLFF::system_fbo = 0;
 
@@ -219,6 +221,119 @@ RID RasterizerStorageGLFF::mesh_create() {
 	return mesh_owner.make_rid(mesh);
 }
 
+// Reconstructs the same per-attribute byte offsets/strides
+// VisualServer::mesh_surface_make_offsets_from_format() used to pack the
+// raw p_array this mesh was handed (that function is the authoritative
+// wire layout, shared by every backend regardless of which compression
+// flags a given surface's format uses -- it isn't GLFF-specific). Ported
+// locally rather than called back into the VisualServer singleton,
+// matching the existing precedent in this codebase: GLES2/GLES3's own
+// mesh_add_surface() do the same local reconstruction instead of reaching
+// up into servers/ from drivers/.
+//
+// rendering/misc/mesh_storage/split_stream defaults to (and in practice
+// always is) false, so every attribute after ARRAY_INDEX shares one
+// combined per-vertex stride (positions_stride + attributes_stride) --
+// this only matters for the ARRAY_VERTEX/use_split_stream special case,
+// kept here for correctness in case that project setting is ever flipped.
+static void _mesh_surface_make_offsets(uint32_t p_format, int p_vertex_len, uint32_t *r_offsets, uint32_t *r_strides) {
+	bool use_split_stream = GLOBAL_GET("rendering/misc/mesh_storage/split_stream") && !(p_format & VS::ARRAY_FLAG_USE_DYNAMIC_UPDATE);
+
+	int attributes_base_offset = 0;
+	int attributes_stride = 0;
+	int positions_stride = 0;
+
+	for (int i = 0; i < VS::ARRAY_MAX; i++) {
+		r_offsets[i] = 0;
+
+		if (!(p_format & (1 << i))) {
+			continue;
+		}
+
+		int elem_size = 0;
+
+		switch (i) {
+			case VS::ARRAY_VERTEX: {
+				elem_size = (p_format & VS::ARRAY_FLAG_USE_2D_VERTICES) ? 2 : 3;
+				elem_size *= (p_format & VS::ARRAY_COMPRESS_VERTEX) ? sizeof(int16_t) : sizeof(float);
+				if (elem_size == 6) {
+					elem_size = 8;
+				}
+				r_offsets[i] = 0;
+				positions_stride = elem_size;
+				attributes_base_offset = use_split_stream ? elem_size * p_vertex_len : elem_size;
+			} break;
+			case VS::ARRAY_NORMAL: {
+				if (p_format & VS::ARRAY_FLAG_USE_OCTAHEDRAL_COMPRESSION) {
+					if ((p_format & VS::ARRAY_COMPRESS_NORMAL) && (p_format & VS::ARRAY_FORMAT_TANGENT) && (p_format & VS::ARRAY_COMPRESS_TANGENT)) {
+						elem_size = sizeof(uint8_t) * 2;
+					} else {
+						elem_size = sizeof(uint16_t) * 2;
+					}
+				} else {
+					elem_size = (p_format & VS::ARRAY_COMPRESS_NORMAL) ? sizeof(uint32_t) : sizeof(float) * 3;
+				}
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_TANGENT: {
+				if (p_format & VS::ARRAY_FLAG_USE_OCTAHEDRAL_COMPRESSION) {
+					if ((p_format & VS::ARRAY_COMPRESS_TANGENT) && (p_format & VS::ARRAY_FORMAT_NORMAL) && (p_format & VS::ARRAY_COMPRESS_NORMAL)) {
+						elem_size = sizeof(uint8_t) * 2;
+					} else {
+						elem_size = sizeof(uint16_t) * 2;
+					}
+				} else {
+					elem_size = (p_format & VS::ARRAY_COMPRESS_TANGENT) ? sizeof(uint32_t) : sizeof(float) * 4;
+				}
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_COLOR: {
+				elem_size = (p_format & VS::ARRAY_COMPRESS_COLOR) ? sizeof(uint32_t) : sizeof(float) * 4;
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_TEX_UV: {
+				elem_size = (p_format & VS::ARRAY_COMPRESS_TEX_UV) ? sizeof(uint32_t) : sizeof(float) * 2;
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_TEX_UV2: {
+				elem_size = (p_format & VS::ARRAY_COMPRESS_TEX_UV2) ? sizeof(uint32_t) : sizeof(float) * 2;
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_WEIGHTS: {
+				elem_size = (p_format & VS::ARRAY_COMPRESS_WEIGHTS) ? sizeof(uint16_t) * 4 : sizeof(float) * 4;
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_BONES: {
+				elem_size = (p_format & VS::ARRAY_FLAG_USE_16_BIT_BONES) ? sizeof(uint16_t) * 4 : sizeof(uint32_t);
+				r_offsets[i] = attributes_base_offset + attributes_stride;
+				attributes_stride += elem_size;
+			} break;
+			case VS::ARRAY_INDEX: {
+				continue; // index buffer is its own separate array, not interleaved here
+			}
+			default: {
+			} break;
+		}
+	}
+
+	if (use_split_stream) {
+		r_strides[VS::ARRAY_VERTEX] = positions_stride;
+		for (int i = 1; i < VS::ARRAY_MAX - 1; i++) {
+			r_strides[i] = attributes_stride;
+		}
+	} else {
+		for (int i = 0; i < VS::ARRAY_MAX - 1; i++) {
+			r_strides[i] = positions_stride + attributes_stride;
+		}
+	}
+}
+
 void RasterizerStorageGLFF::mesh_add_surface(RID p_mesh, uint32_t p_format, VS::PrimitiveType p_primitive, const PoolVector<uint8_t> &p_array, int p_vertex_count, const PoolVector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<PoolVector<uint8_t>> &p_blend_shapes, const Vector<AABB> &p_bone_aabbs) {
 	Mesh *mesh = mesh_owner.getornull(p_mesh);
 	ERR_FAIL_COND(!mesh);
@@ -233,6 +348,94 @@ void RasterizerStorageGLFF::mesh_add_surface(RID p_mesh, uint32_t p_format, VS::
 	surface->aabb = p_aabb;
 	surface->blend_shapes = p_blend_shapes;
 	surface->bone_aabbs = p_bone_aabbs;
+
+	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
+	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;
+	surface->has_uvs = (p_format & VS::ARRAY_FORMAT_TEX_UV) != 0;
+
+	if (p_vertex_count > 0 && (p_format & VS::ARRAY_FORMAT_VERTEX)) {
+		uint32_t offsets[VS::ARRAY_MAX];
+		uint32_t strides[VS::ARRAY_MAX];
+		_mesh_surface_make_offsets(p_format, p_vertex_count, offsets, strides);
+
+		PoolVector<uint8_t>::Read r = p_array.read();
+		const uint8_t *base = r.ptr();
+
+		surface->vertices.resize(p_vertex_count);
+		PoolVector<Vector3>::Write vw = surface->vertices.write();
+
+		PoolVector<Vector3>::Write nw;
+		if (surface->has_normals) {
+			surface->normals.resize(p_vertex_count);
+			nw = surface->normals.write();
+		}
+		PoolVector<Color>::Write cw;
+		if (surface->has_colors) {
+			surface->colors.resize(p_vertex_count);
+			cw = surface->colors.write();
+		}
+		PoolVector<Vector2>::Write uw;
+		if (surface->has_uvs) {
+			surface->uvs.resize(p_vertex_count);
+			uw = surface->uvs.write();
+		}
+
+		bool normal_octahedral = (p_format & VS::ARRAY_FLAG_USE_OCTAHEDRAL_COMPRESSION) != 0;
+		bool normal_packed_byte = normal_octahedral && (p_format & VS::ARRAY_COMPRESS_NORMAL) && (p_format & VS::ARRAY_FORMAT_TANGENT) && (p_format & VS::ARRAY_COMPRESS_TANGENT);
+
+		for (int i = 0; i < p_vertex_count; i++) {
+			const uint8_t *vptr = base + offsets[VS::ARRAY_VERTEX] + i * strides[VS::ARRAY_VERTEX];
+			if (p_format & VS::ARRAY_COMPRESS_VERTEX) {
+				const uint16_t *h = (const uint16_t *)vptr;
+				vw[i] = Vector3(Math::half_to_float(h[0]), Math::half_to_float(h[1]), Math::half_to_float(h[2]));
+			} else {
+				const float *f = (const float *)vptr;
+				vw[i] = Vector3(f[0], f[1], f[2]);
+			}
+
+			if (surface->has_normals) {
+				const uint8_t *nptr = base + offsets[VS::ARRAY_NORMAL] + i * strides[VS::ARRAY_NORMAL];
+				if (normal_octahedral) {
+					Vector2 oct;
+					if (normal_packed_byte) {
+						const int8_t *b = (const int8_t *)nptr;
+						oct = Vector2(b[0] / 127.0f, b[1] / 127.0f);
+					} else {
+						const int16_t *s = (const int16_t *)nptr;
+						oct = Vector2(s[0] / 32767.0f, s[1] / 32767.0f);
+					}
+					nw[i] = VisualServer::oct_to_norm(oct);
+				} else if (p_format & VS::ARRAY_COMPRESS_NORMAL) {
+					const int8_t *b = (const int8_t *)nptr;
+					nw[i] = Vector3(b[0] / 127.0f, b[1] / 127.0f, b[2] / 127.0f);
+				} else {
+					const float *f = (const float *)nptr;
+					nw[i] = Vector3(f[0], f[1], f[2]);
+				}
+			}
+
+			if (surface->has_colors) {
+				const uint8_t *cptr = base + offsets[VS::ARRAY_COLOR] + i * strides[VS::ARRAY_COLOR];
+				if (p_format & VS::ARRAY_COMPRESS_COLOR) {
+					cw[i] = Color(cptr[0] / 255.0f, cptr[1] / 255.0f, cptr[2] / 255.0f, cptr[3] / 255.0f);
+				} else {
+					const float *f = (const float *)cptr;
+					cw[i] = Color(f[0], f[1], f[2], f[3]);
+				}
+			}
+
+			if (surface->has_uvs) {
+				const uint8_t *uptr = base + offsets[VS::ARRAY_TEX_UV] + i * strides[VS::ARRAY_TEX_UV];
+				if (p_format & VS::ARRAY_COMPRESS_TEX_UV) {
+					const uint16_t *h = (const uint16_t *)uptr;
+					uw[i] = Vector2(Math::half_to_float(h[0]), Math::half_to_float(h[1]));
+				} else {
+					const float *f = (const float *)uptr;
+					uw[i] = Vector2(f[0], f[1]);
+				}
+			}
+		}
+	}
 
 	mesh->surfaces.push_back(surface);
 }

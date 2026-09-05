@@ -128,8 +128,21 @@ public:
 	/* MATERIAL (stub for Phase 1 -- real SpatialMaterial/CanvasItemMaterial
 	   mapping per godot-ports#17's table is Phase 4's job) */
 
+	// Phase 4's job (godot-ports#17) is the full SpatialMaterial mapping
+	// table; for now, just the two params that matter to get a textured/
+	// tinted mesh on screen at all -- "albedo" (Color) and "texture_albedo"
+	// (RID, the only way SpatialMaterial hands a texture to a backend in
+	// this Godot version -- see scene/resources/material.cpp's
+	// shader_names->texture_names[TEXTURE_ALBEDO] = "texture_albedo",
+	// pushed via the same material_set_param() call, not a dedicated
+	// material_set_texture() -- this API has none).
 	struct Material : public RID_Data {
 		Color albedo;
+		RID albedo_texture;
+
+		Material() {
+			albedo = Color(1, 1, 1, 1);
+		}
 	};
 	mutable RID_Owner<Material> material_owner;
 
@@ -140,7 +153,15 @@ public:
 	virtual void material_set_render_priority(RID p_material, int priority) {}
 	virtual void material_set_shader(RID p_shader_material, RID p_shader) {}
 	virtual RID material_get_shader(RID p_shader_material) const { return RID(); }
-	virtual void material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) {}
+	virtual void material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) {
+		Material *m = material_owner.getornull(p_material);
+		ERR_FAIL_COND(!m);
+		if (p_param == StringName("albedo")) {
+			m->albedo = p_value;
+		} else if (p_param == StringName("texture_albedo")) {
+			m->albedo_texture = p_value;
+		}
+	}
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const { return Variant(); }
 	virtual Variant material_get_param_default(RID p_material, const StringName &p_param) const { return Variant(); }
 	virtual void material_set_line_width(RID p_material, float p_width) {}
@@ -164,6 +185,24 @@ public:
 		Vector<PoolVector<uint8_t>> blend_shapes;
 		Vector<AABB> bone_aabbs;
 		RID material;
+
+		// Phase 3: decoded once at mesh_add_surface() time into plain,
+		// uncompressed CPU-side arrays -- fixed-function glVertexPointer/
+		// glNormalPointer/glColorPointer/glTexCoordPointer can't consume
+		// the packed/compressed formats a shader-based glVertexAttribPointer
+		// pipeline can (half-float, octahedral-compressed normals, byte
+		// colors -- see VisualServer::mesh_surface_make_offsets_from_format
+		// for the authoritative wire layout this decode mirrors). Tangent,
+		// UV2 (lightmap), bones, and weights are deliberately not decoded --
+		// no normal-mapping, lightmap-blending, or skinning in this backend
+		// yet (see godot-ports#14 proposal, Phase 3 scope).
+		PoolVector<Vector3> vertices;
+		PoolVector<Vector3> normals;
+		PoolVector<Color> colors;
+		PoolVector<Vector2> uvs;
+		bool has_normals = false;
+		bool has_colors = false;
+		bool has_uvs = false;
 	};
 
 	struct Mesh : public RID_Data {

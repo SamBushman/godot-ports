@@ -5,16 +5,17 @@
 #include "servers/visual/rasterizer.h"
 
 // 3D scene renderer for the GLFF (OpenGL 1.2 fixed-function) driver.
-// Phase 1 scope only (godot-ports#14 proposal, Phase 1): enough to clear
-// the screen and draw one hardcoded flat-shaded triangle, proving the
-// whole driver-selection -> context -> frame-loop -> visible-pixels chain
-// works end to end. Real mesh/material rendering (walking p_cull_result,
-// applying the §5.2 SpatialMaterial mapping, per-vertex lighting via
-// GL_LIGHT0-7, multi-pass lightmap blending per #16) is Phase 3's job, not
-// built here. Everything below that Phase 3 will eventually flesh out is a
-// minimal but RID-correct stub (real RID_Owner-backed create/free, no-op
-// setters) rather than a bare RID()-returning placeholder, so the object
-// lifecycle is safe to extend incrementally.
+// render_scene() (see .cpp) is Phase 3's real mesh/material/lighting path:
+// walks p_cull_result, decodes each RasterizerStorageGLFF::Surface's
+// pre-decoded plain vertex arrays into glVertexPointer/etc., maps albedo
+// color/texture from RasterizerStorageGLFF::Material, and drives
+// GL_LIGHT0-7 from real Light storage. Multi-pass lightmap blending (#16)
+// and shadows are not built here -- see the .cpp's render_scene() comment
+// for the full list of what's deliberately out of scope. Everything below
+// that a later phase will eventually flesh out is a minimal but
+// RID-correct stub (real RID_Owner-backed create/free, no-op setters)
+// rather than a bare RID()-returning placeholder, so the object lifecycle
+// is safe to extend incrementally.
 
 class RasterizerStorageGLFF;
 
