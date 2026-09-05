@@ -182,238 +182,201 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 		glDisable(GL_LIGHT0 + i);
 	}
 
-	for (int i = 0; i < p_cull_count; i++) {
-		InstanceBase *instance = p_cull_result[i];
-		if (!instance->visible || instance->base_type != VS::INSTANCE_MESH) {
-			continue;
-		}
-
-		RasterizerStorageGLFF::Mesh *mesh = storage->mesh_owner.getornull(instance->base);
-		if (!mesh) {
-			continue;
-		}
-
-		glPushMatrix();
-		GLfloat gl_model[16];
-		_load_transform_gl(instance->transform, gl_model);
-		glMultMatrixf(gl_model);
-
-		for (int s = 0; s < mesh->surfaces.size(); s++) {
-			RasterizerStorageGLFF::Surface *surface = mesh->surfaces[s];
-			if (surface->vertex_count == 0) {
+	// Two passes: real (depth-tested) scene content first, then anything
+	// whose material requests depth_test_disable (editor gizmos/handles,
+	// "always on top" overlays) last. This backend has no FBO/depth
+	// texture to give "on top" content real depth protection against
+	// content drawn after it, so draw ORDER is the only thing that can
+	// guarantee it -- p_cull_result's order comes straight from the
+	// octree/frustum culling pass and is NOT guaranteed to already put
+	// opaque content before on-top content (godot-ports#28: confirmed via
+	// incremental isolation testing that the move-gizmo was reliably
+	// getting overwritten by the Ground cube's opaque draw whenever the
+	// cube happened to be culled/ordered after the gizmo for a given
+	// frame -- exactly reproducing the user's "camera-angle-dependent,
+	// abrupt disappearance" report, and explained by the octree's
+	// traversal order changing with camera position/angle).
+	for (int pass = 0; pass < 2; pass++) {
+		for (int i = 0; i < p_cull_count; i++) {
+			InstanceBase *instance = p_cull_result[i];
+			if (!instance->visible || instance->base_type != VS::INSTANCE_MESH) {
 				continue;
 			}
 
-			// TEMPORARY incremental isolation test (godot-ports#28): gizmo-
-			// only, then gizmo+grid+origin-lines, both confirmed reliable
-			// by the user. Adding back the Ground CubeMesh next (a
-			// standard Godot PrimitiveMesh cube, exactly 24 verts -- 4 per
-			// face x 6 faces -- confirmed via Main.tscn's
-			// SubResource(CubeMesh, size 60x2x60)) while still excluding
-			// the Player/Mob character meshes (hundreds+ verts from
-			// imported .glb data) to narrow down the conflict further.
-			bool is_gizmo_arrow = (surface->vertex_count == 384);
-			bool is_grid_or_origin_lines = (surface->primitive == VS::PRIMITIVE_LINES);
-			bool is_ground_cube = (surface->vertex_count == 24);
-			if (!is_gizmo_arrow && !is_grid_or_origin_lines && !is_ground_cube) {
+			RasterizerStorageGLFF::Mesh *mesh = storage->mesh_owner.getornull(instance->base);
+			if (!mesh) {
 				continue;
 			}
 
-			RID mat_rid = instance->material_override.is_valid() ? instance->material_override : ((s < instance->materials.size() && instance->materials[s].is_valid()) ? instance->materials[s] : surface->material);
-			RasterizerStorageGLFF::Material *mat = storage->material_owner.getornull(mat_rid);
-			Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
-			RasterizerStorageGLFF::Texture *tex = (mat && mat->albedo_texture.is_valid()) ? storage->texture_owner.getornull(mat->albedo_texture) : nullptr;
-			if (tex) {
-				// resolve ViewportTexture proxies (e.g. a SubViewport used as
-				// a material's albedo texture) -- see the Texture::proxy
-				// comment in rasterizer_storage_glff.h (godot-ports#28).
-				tex = tex->get_ptr();
-			}
-			RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? storage->shader_owner.getornull(mat->shader) : nullptr;
+			bool matrix_pushed = false;
 
-			glColor4f(albedo.r, albedo.g, albedo.b, albedo.a);
-			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, albedo.a };
-			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
-			glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
-
-			// Per-material blend mode (godot-ports#24/#17): MIX is the
-			// default alpha-blend-if-transparent behavior already in
-			// place; ADD/MUL/SUB are real GL blend-equation/-func direct
-			// maps, not approximations (SUB needs glBlendEquation, core
-			// GL 1.4 -- a real finding from the proposal's material
-			// research, not an oversight of the strict-1.2 floor).
-			glBlendEquation(GL_FUNC_ADD);
-			if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_ADD) {
-				glEnable(GL_BLEND);
-				glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-			} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_MUL) {
-				glEnable(GL_BLEND);
-				glBlendFunc(GL_DST_COLOR, GL_ZERO);
-			} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_SUB) {
-				glEnable(GL_BLEND);
-				glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
-				glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-			} else if (albedo.a < 0.999f) {
-				glEnable(GL_BLEND);
-				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-			} else {
-				glDisable(GL_BLEND);
-			}
-
-			// Per-material cull mode override (default is the GL_BACK set
-			// once per-frame above). Unshaded surfaces (editor gizmos,
-			// axis lines -- always unshaded, see surface_unshaded below)
-			// also skip backface culling by default, regardless of
-			// cull_mode: this fixed-function backend has NO CHOICE but to
-			// rely on hardware glFrontFace/glCullFace for culling (unlike
-			// GLES2/GLES3, which compute front/back-facing per-fragment
-			// in a shader, decoupled from hardware winding state) -- so
-			// GLFF is the first backend where a real winding mismatch
-			// between imported glTF content (reordered to match Godot's
-			// CW-front convention at import time) and procedurally-
-			// authored SurfaceTool geometry (gizmos, never reordered,
-			// possibly GL's native CCW-front) actually matters. This
-			// exactly matches the reported symptom (godot-ports#28): the
-			// move-gizmo's per-axis cone abruptly vanishing/reappearing
-			// as the camera rotates, with no visible size change --
-			// classic binary backface-cull behavior, not a scale/culling-
-			// frustum/depth issue (all independently ruled out first).
-			if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
-				glEnable(GL_CULL_FACE);
-				glCullFace(GL_FRONT);
-			} else if ((shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) || (shader && shader->unshaded)) {
-				glDisable(GL_CULL_FACE);
-			} else {
-				glEnable(GL_CULL_FACE);
-				glCullFace(GL_BACK);
-			}
-
-			if (shader && shader->depth_test_disabled) {
-				glDisable(GL_DEPTH_TEST);
-			} else {
-				glEnable(GL_DEPTH_TEST);
-			}
-
-			// FLAG_UNSHADED: this surface ignores GL_LIGHT0-7 regardless
-			// of whether lighting is on for the rest of the scene.
-			bool surface_unshaded = shader && shader->unshaded;
-			if (surface_unshaded) {
-				glDisable(GL_LIGHTING);
-			} else if (max_lights > 0) {
-				glEnable(GL_LIGHTING);
-			}
-
-			glEnableClientState(GL_VERTEX_ARRAY);
-			PoolVector<Vector3>::Read vr = surface->vertices.read();
-			glVertexPointer(3, GL_FLOAT, 0, vr.ptr());
-
-			PoolVector<Vector3>::Read nr;
-			if (surface->has_normals) {
-				nr = surface->normals.read();
-				glEnableClientState(GL_NORMAL_ARRAY);
-				glNormalPointer(GL_FLOAT, 0, nr.ptr());
-			} else {
-				glDisableClientState(GL_NORMAL_ARRAY);
-			}
-
-			// Per-vertex color arrays and GL_LIGHTING interact via
-			// GL_COLOR_MATERIAL, which we don't enable here -- a *shaded*
-			// surface with both vertex colors and active lighting draws
-			// using the material's albedo only (documented simplification,
-			// no content in this driver's target scope combines the two).
-			// This must NOT gate on the scene-wide max_lights count, though
-			// -- editor gizmos (axis lines, move/rotate/scale handles) are
-			// real per-vertex-colored (red/green/blue per axis), always-
-			// unshaded geometry (surface_unshaded above), and were going
-			// uncolored in any scene with a real light (e.g. the "Squash
-			// the Creeps" tutorial's DirectionalLight), since max_lights>0
-			// disabled vertex colors globally regardless of whether THIS
-			// surface even has lighting enabled (godot-ports#28).
-			PoolVector<Color>::Read cr;
-			if (surface->has_colors && (surface_unshaded || max_lights == 0)) {
-				cr = surface->colors.read();
-				glEnableClientState(GL_COLOR_ARRAY);
-				glColorPointer(4, GL_FLOAT, 0, cr.ptr());
-			} else {
-				glDisableClientState(GL_COLOR_ARRAY);
-			}
-
-			PoolVector<Vector2>::Read ur;
-			if (surface->has_uvs && tex) {
-				glEnable(GL_TEXTURE_2D);
-				glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-				glBindTexture(GL_TEXTURE_2D, tex->tex_id);
-				ur = surface->uvs.read();
-				glEnableClientState(GL_TEXTURE_COORD_ARRAY);
-				glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
-			} else {
-				glDisable(GL_TEXTURE_2D);
-				glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-			}
-
-			GLenum gl_primitive = _primitive_to_gl(surface->primitive);
-
-			bool trace_this = (surface->vertex_count == 384);
-			if (trace_this) {
-				GLfloat mv[16];
-				glGetFloatv(GL_MODELVIEW_MATRIX, mv);
-
-				// Find the vertex farthest from the local origin -- for this
-				// arrow-cone geometry that's the tip/apex -- to directly
-				// test the "gizmo scale places 2 of 3 axes' geometry
-				// outside the view frustum" hypothesis (godot-ports#28):
-				// transform it through the full MVP and check its clip-
-				// space coordinates against the standard -w..w frustum
-				// bounds, rather than continuing to infer this indirectly.
-				PoolVector<Vector3>::Read vr2 = surface->vertices.read();
-				int farthest_idx = 0;
-				float farthest_d2 = 0;
-				for (int vi = 0; vi < surface->vertex_count; vi++) {
-					float d2 = vr2[vi].length_squared();
-					if (d2 > farthest_d2) {
-						farthest_d2 = d2;
-						farthest_idx = vi;
-					}
+			for (int s = 0; s < mesh->surfaces.size(); s++) {
+				RasterizerStorageGLFF::Surface *surface = mesh->surfaces[s];
+				if (surface->vertex_count == 0) {
+					continue;
 				}
-				Vector3 tip = vr2[farthest_idx];
 
-				// mv is column-major (GL convention): eye = mv * local.
-				float ex = mv[0] * tip.x + mv[4] * tip.y + mv[8] * tip.z + mv[12];
-				float ey = mv[1] * tip.x + mv[5] * tip.y + mv[9] * tip.z + mv[13];
-				float ez = mv[2] * tip.x + mv[6] * tip.y + mv[10] * tip.z + mv[14];
-				float ew = mv[3] * tip.x + mv[7] * tip.y + mv[11] * tip.z + mv[15];
-				// gl_proj (declared at the top of render_scene()) is also
-				// column-major.
-				float cx = gl_proj[0] * ex + gl_proj[4] * ey + gl_proj[8] * ez + gl_proj[12] * ew;
-				float cy = gl_proj[1] * ex + gl_proj[5] * ey + gl_proj[9] * ez + gl_proj[13] * ew;
-				float cz = gl_proj[2] * ex + gl_proj[6] * ey + gl_proj[10] * ez + gl_proj[14] * ew;
-				float cw = gl_proj[3] * ex + gl_proj[7] * ey + gl_proj[11] * ez + gl_proj[15] * ew;
+				RID mat_rid = instance->material_override.is_valid() ? instance->material_override : ((s < instance->materials.size() && instance->materials[s].is_valid()) ? instance->materials[s] : surface->material);
+				RasterizerStorageGLFF::Material *mat = storage->material_owner.getornull(mat_rid);
+				RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? storage->shader_owner.getornull(mat->shader) : nullptr;
 
-				static long frame_counter = 0;
-				frame_counter++;
-				fprintf(stderr, "GLFF DEBUG: gizmo-arrow frame=%ld inst=%p albedo=(%.2f,%.2f,%.2f) tip_local=(%.3f,%.3f,%.3f) clip=(%.2f,%.2f,%.2f,%.2f) ndc=(%.2f,%.2f,%.2f)\n",
-						frame_counter, (void *)instance, albedo.r, albedo.g, albedo.b,
-						tip.x, tip.y, tip.z, cx, cy, cz, cw,
-						cw != 0 ? cx / cw : 0, cw != 0 ? cy / cw : 0, cw != 0 ? cz / cw : 0);
-				fflush(stderr);
+				bool surface_on_top = shader && shader->depth_test_disabled;
+				if (surface_on_top != (pass == 1)) {
+					continue;
+				}
+
+				if (!matrix_pushed) {
+					glPushMatrix();
+					GLfloat gl_model[16];
+					_load_transform_gl(instance->transform, gl_model);
+					glMultMatrixf(gl_model);
+					matrix_pushed = true;
+				}
+
+				Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
+				RasterizerStorageGLFF::Texture *tex = (mat && mat->albedo_texture.is_valid()) ? storage->texture_owner.getornull(mat->albedo_texture) : nullptr;
+				if (tex) {
+					// resolve ViewportTexture proxies (e.g. a SubViewport used as
+					// a material's albedo texture) -- see the Texture::proxy
+					// comment in rasterizer_storage_glff.h (godot-ports#28).
+					tex = tex->get_ptr();
+				}
+
+				glColor4f(albedo.r, albedo.g, albedo.b, albedo.a);
+				GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, albedo.a };
+				glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
+				glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
+
+				// Per-material blend mode (godot-ports#24/#17): MIX is the
+				// default alpha-blend-if-transparent behavior already in
+				// place; ADD/MUL/SUB are real GL blend-equation/-func direct
+				// maps, not approximations (SUB needs glBlendEquation, core
+				// GL 1.4 -- a real finding from the proposal's material
+				// research, not an oversight of the strict-1.2 floor).
+				glBlendEquation(GL_FUNC_ADD);
+				if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_ADD) {
+					glEnable(GL_BLEND);
+					glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+				} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_MUL) {
+					glEnable(GL_BLEND);
+					glBlendFunc(GL_DST_COLOR, GL_ZERO);
+				} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_SUB) {
+					glEnable(GL_BLEND);
+					glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+					glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+				} else if (albedo.a < 0.999f) {
+					glEnable(GL_BLEND);
+					glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+				} else {
+					glDisable(GL_BLEND);
+				}
+
+				// Per-material cull mode override (default is the GL_BACK set
+				// once per-frame above). Unshaded surfaces (editor gizmos,
+				// axis lines -- always unshaded, see surface_unshaded below)
+				// also skip backface culling by default, regardless of
+				// cull_mode: this fixed-function backend has NO CHOICE but to
+				// rely on hardware glFrontFace/glCullFace for culling (unlike
+				// GLES2/GLES3, which compute front/back-facing per-fragment
+				// in a shader, decoupled from hardware winding state) -- so
+				// GLFF is the first backend where a real winding mismatch
+				// between imported glTF content (reordered to match Godot's
+				// CW-front convention at import time) and procedurally-
+				// authored SurfaceTool geometry (gizmos, never reordered,
+				// possibly GL's native CCW-front) actually matters. This
+				// exactly matches the reported symptom (godot-ports#28): the
+				// move-gizmo's per-axis cone abruptly vanishing/reappearing
+				// as the camera rotates, with no visible size change --
+				// classic binary backface-cull behavior, not a scale/culling-
+				// frustum/depth issue (all independently ruled out first).
+				if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
+					glEnable(GL_CULL_FACE);
+					glCullFace(GL_FRONT);
+				} else if ((shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) || (shader && shader->unshaded)) {
+					glDisable(GL_CULL_FACE);
+				} else {
+					glEnable(GL_CULL_FACE);
+					glCullFace(GL_BACK);
+				}
+
+				if (shader && shader->depth_test_disabled) {
+					glDisable(GL_DEPTH_TEST);
+				} else {
+					glEnable(GL_DEPTH_TEST);
+				}
+
+				// FLAG_UNSHADED: this surface ignores GL_LIGHT0-7 regardless
+				// of whether lighting is on for the rest of the scene.
+				bool surface_unshaded = shader && shader->unshaded;
+				if (surface_unshaded) {
+					glDisable(GL_LIGHTING);
+				} else if (max_lights > 0) {
+					glEnable(GL_LIGHTING);
+				}
+
+				glEnableClientState(GL_VERTEX_ARRAY);
+				PoolVector<Vector3>::Read vr = surface->vertices.read();
+				glVertexPointer(3, GL_FLOAT, 0, vr.ptr());
+
+				PoolVector<Vector3>::Read nr;
+				if (surface->has_normals) {
+					nr = surface->normals.read();
+					glEnableClientState(GL_NORMAL_ARRAY);
+					glNormalPointer(GL_FLOAT, 0, nr.ptr());
+				} else {
+					glDisableClientState(GL_NORMAL_ARRAY);
+				}
+
+				// Per-vertex color arrays and GL_LIGHTING interact via
+				// GL_COLOR_MATERIAL, which we don't enable here -- a *shaded*
+				// surface with both vertex colors and active lighting draws
+				// using the material's albedo only (documented simplification,
+				// no content in this driver's target scope combines the two).
+				// This must NOT gate on the scene-wide max_lights count, though
+				// -- editor gizmos (axis lines, move/rotate/scale handles) are
+				// real per-vertex-colored (red/green/blue per axis), always-
+				// unshaded geometry (surface_unshaded above), and were going
+				// uncolored in any scene with a real light (e.g. the "Squash
+				// the Creeps" tutorial's DirectionalLight), since max_lights>0
+				// disabled vertex colors globally regardless of whether THIS
+				// surface even has lighting enabled (godot-ports#28).
+				PoolVector<Color>::Read cr;
+				if (surface->has_colors && (surface_unshaded || max_lights == 0)) {
+					cr = surface->colors.read();
+					glEnableClientState(GL_COLOR_ARRAY);
+					glColorPointer(4, GL_FLOAT, 0, cr.ptr());
+				} else {
+					glDisableClientState(GL_COLOR_ARRAY);
+				}
+
+				PoolVector<Vector2>::Read ur;
+				if (surface->has_uvs && tex) {
+					glEnable(GL_TEXTURE_2D);
+					glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+					glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+					ur = surface->uvs.read();
+					glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+					glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
+				} else {
+					glDisable(GL_TEXTURE_2D);
+					glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+				}
+
+				GLenum gl_primitive = _primitive_to_gl(surface->primitive);
+
+				if (surface->index_count > 0) {
+					GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+					PoolVector<uint8_t>::Read ir = surface->index_array.read();
+					glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
+				} else {
+					glDrawArrays(gl_primitive, 0, surface->vertex_count);
+				}
 			}
 
-			if (surface->index_count > 0) {
-				GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
-				PoolVector<uint8_t>::Read ir = surface->index_array.read();
-				glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
-			} else {
-				glDrawArrays(gl_primitive, 0, surface->vertex_count);
-			}
-
-			if (trace_this) {
-				GLenum err = glGetError();
-				fprintf(stderr, "GLFF DEBUG: gizmo-arrow post-draw err=0x%x\n", (unsigned)err);
-				fflush(stderr);
+			if (matrix_pushed) {
+				glPopMatrix();
 			}
 		}
-
-		glPopMatrix();
 	}
 
 	glDisableClientState(GL_VERTEX_ARRAY);
