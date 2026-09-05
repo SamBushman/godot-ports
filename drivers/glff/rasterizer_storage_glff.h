@@ -748,7 +748,21 @@ public:
 		if (!tex) {
 			return;
 		}
+		// Drain any backlogged, unrelated GL errors first -- glGetError()
+		// only ever returns the OLDEST unretrieved error, so without this
+		// an error from some earlier, unrelated engine GL call would be
+		// misattributed to this copy (a real gotcha already hit once
+		// earlier this project, see feedback_opengl_graphics_debugging).
+		int drained = 0;
+		while (glGetError() != GL_NO_ERROR) {
+			drained++;
+		}
+		fprintf(stderr, "GLFF DEBUG: drained %d backlogged errors before copy\n", drained);
+		fflush(stderr);
 		glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+		GLenum bind_err = glGetError();
+		fprintf(stderr, "GLFF DEBUG: glBindTexture err=0x%x\n", bind_err);
+		fflush(stderr);
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, rt->width, rt->height);
 		GLenum err = glGetError();
 		fprintf(stderr, "GLFF DEBUG: copy_to_texture glGetError=0x%x\n", err);
