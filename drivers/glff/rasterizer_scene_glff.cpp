@@ -204,12 +204,15 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				continue;
 			}
 
-			// TEMPORARY isolation test (godot-ports#28): skip every surface
-			// that isn't the gizmo-arrow geometry (vertex_count == 384,
-			// confirmed via prior tracing), to check whether the gizmo
-			// renders correctly when nothing else in the scene (ground,
-			// player mesh, grid) is drawn alongside it.
-			if (surface->vertex_count != 384) {
+			// TEMPORARY incremental isolation test (godot-ports#28): the
+			// gizmo-only build rendered reliably (confirmed by the user).
+			// Adding back the grid + global origin-axis lines next (both
+			// use PRIMITIVE_LINES, unlike the ground/player mesh's
+			// triangles and the gizmo's own 384-vert triangles) to narrow
+			// down which specific scene element the gizmo conflicts with.
+			bool is_gizmo_arrow = (surface->vertex_count == 384);
+			bool is_grid_or_origin_lines = (surface->primitive == VS::PRIMITIVE_LINES);
+			if (!is_gizmo_arrow && !is_grid_or_origin_lines) {
 				continue;
 			}
 
