@@ -285,12 +285,20 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			}
 
 			// Per-vertex color arrays and GL_LIGHTING interact via
-			// GL_COLOR_MATERIAL, which we don't enable here -- a surface
-			// with both vertex colors and active lighting draws using the
-			// material's albedo only (documented simplification, no
-			// content in this driver's target scope combines the two).
+			// GL_COLOR_MATERIAL, which we don't enable here -- a *shaded*
+			// surface with both vertex colors and active lighting draws
+			// using the material's albedo only (documented simplification,
+			// no content in this driver's target scope combines the two).
+			// This must NOT gate on the scene-wide max_lights count, though
+			// -- editor gizmos (axis lines, move/rotate/scale handles) are
+			// real per-vertex-colored (red/green/blue per axis), always-
+			// unshaded geometry (surface_unshaded above), and were going
+			// uncolored in any scene with a real light (e.g. the "Squash
+			// the Creeps" tutorial's DirectionalLight), since max_lights>0
+			// disabled vertex colors globally regardless of whether THIS
+			// surface even has lighting enabled (godot-ports#28).
 			PoolVector<Color>::Read cr;
-			if (surface->has_colors && max_lights == 0) {
+			if (surface->has_colors && (surface_unshaded || max_lights == 0)) {
 				cr = surface->colors.read();
 				glEnableClientState(GL_COLOR_ARRAY);
 				glColorPointer(4, GL_FLOAT, 0, cr.ptr());
