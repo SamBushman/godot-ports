@@ -52,12 +52,15 @@ public:
 		// screen framebuffer (GL's bottom-left-origin convention) into
 		// texture row 0, which is the OPPOSITE of a normally-loaded image
 		// texture's row 0 (top of the image, per how Image/PNG data is
-		// uploaded) -- sampling it with ordinary top-down V coordinates
-		// would show render targets (ViewportContainer, the editor's own
-		// 3D panel) upside down. Canvas RECT drawing flips V specifically
-		// for textures flagged this way instead of flipping the render
-		// pass itself, so the already-verified-correct main-viewport
-		// rendering stays completely untouched (godot-ports#28).
+		// uploaded) -- same as every FBO-based backend's render-target
+		// textures. Godot itself already compensates for this universally
+		// (ViewportContainer draws with a negative-height rect, which
+		// canvas_item_add_texture_rect turns into CANVAS_RECT_FLIP_V), so
+		// no GLFF-specific extra flip is applied on top of that -- see the
+		// CANVAS_RECT_FLIP_V handling in rasterizer_canvas_glff.cpp
+		// (godot-ports#28: an earlier version added a redundant extra
+		// flip here, which canceled Godot's own compensation back out and
+		// rendered SubViewport-as-texture content upside down).
 		bool is_render_target;
 		// Real GL texture storage dimensions when they differ from the
 		// logical width/height above -- only ever set for is_render_target

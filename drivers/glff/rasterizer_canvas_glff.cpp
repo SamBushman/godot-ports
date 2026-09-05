@@ -202,12 +202,24 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						SWAP(u0, u1);
 					}
 					if (r->flags & CANVAS_RECT_FLIP_V) {
-						SWAP(v0, v1);
-					}
-					if (tex && tex->is_render_target) {
-						// See the is_render_target comment in
-						// rasterizer_storage_glff.h -- composes correctly
-						// with the FLIP_V case above (two swaps cancel out).
+						// Render-target textures are populated bottom-up
+						// (glCopyTexSubImage2D pulls from GL's bottom-left-
+						// origin framebuffer into texture row 0 -- the
+						// OPPOSITE of a normally-loaded top-down image
+						// texture), same as every FBO-based backend's
+						// render-target textures. Godot itself already
+						// knows this and compensates universally:
+						// ViewportContainer (scene/gui/viewport_container.cpp)
+						// draws with a *negative*-height rect specifically
+						// for its child Viewport's texture, which is what
+						// sets this FLIP_V flag in the first place (see
+						// visual_server_canvas.cpp's canvas_item_add_texture_rect).
+						// No GLFF-specific extra flip is needed on top of
+						// this -- an earlier version of this code added one
+						// unconditionally, which canceled this correct flip
+						// back out and rendered SubViewport-as-texture
+						// content (the editor's own 3D panel) upside down
+						// (godot-ports#28).
 						SWAP(v0, v1);
 					}
 
