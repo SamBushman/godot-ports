@@ -191,17 +191,62 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			RasterizerStorageGLFF::Material *mat = storage->material_owner.getornull(mat_rid);
 			Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
 			RasterizerStorageGLFF::Texture *tex = (mat && mat->albedo_texture.is_valid()) ? storage->texture_owner.getornull(mat->albedo_texture) : nullptr;
+			RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? storage->shader_owner.getornull(mat->shader) : nullptr;
 
 			glColor4f(albedo.r, albedo.g, albedo.b, albedo.a);
 			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, albedo.a };
 			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
 			glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
 
-			if (albedo.a < 0.999f) {
+			// Per-material blend mode (godot-ports#24/#17): MIX is the
+			// default alpha-blend-if-transparent behavior already in
+			// place; ADD/MUL/SUB are real GL blend-equation/-func direct
+			// maps, not approximations (SUB needs glBlendEquation, core
+			// GL 1.4 -- a real finding from the proposal's material
+			// research, not an oversight of the strict-1.2 floor).
+			glBlendEquation(GL_FUNC_ADD);
+			if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_ADD) {
+				glEnable(GL_BLEND);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_MUL) {
+				glEnable(GL_BLEND);
+				glBlendFunc(GL_DST_COLOR, GL_ZERO);
+			} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_SUB) {
+				glEnable(GL_BLEND);
+				glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			} else if (albedo.a < 0.999f) {
 				glEnable(GL_BLEND);
 				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 			} else {
 				glDisable(GL_BLEND);
+			}
+
+			// Per-material cull mode override (default is the GL_BACK set
+			// once per-frame above).
+			if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
+				glEnable(GL_CULL_FACE);
+				glCullFace(GL_FRONT);
+			} else if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) {
+				glDisable(GL_CULL_FACE);
+			} else {
+				glEnable(GL_CULL_FACE);
+				glCullFace(GL_BACK);
+			}
+
+			if (shader && shader->depth_test_disabled) {
+				glDisable(GL_DEPTH_TEST);
+			} else {
+				glEnable(GL_DEPTH_TEST);
+			}
+
+			// FLAG_UNSHADED: this surface ignores GL_LIGHT0-7 regardless
+			// of whether lighting is on for the rest of the scene.
+			bool surface_unshaded = shader && shader->unshaded;
+			if (surface_unshaded) {
+				glDisable(GL_LIGHTING);
+			} else if (max_lights > 0) {
+				glEnable(GL_LIGHTING);
 			}
 
 			glEnableClientState(GL_VERTEX_ARRAY);
@@ -265,6 +310,12 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	glDisable(GL_LIGHTING);
 	glDisable(GL_TEXTURE_2D);
 	glDisable(GL_BLEND);
+	// A BLEND_MODE_SUB surface leaves GL_FUNC_REVERSE_SUBTRACT active --
+	// canvas_begin() (2D pass, runs right after this) never touches the
+	// blend equation itself, only glBlendFunc, so this must be reset here
+	// or every subsequent 2D draw this frame silently blends with the
+	// wrong arithmetic operator.
+	glBlendEquation(GL_FUNC_ADD);
 	glDisable(GL_DEPTH_TEST);
 	glDisable(GL_CULL_FACE);
 }

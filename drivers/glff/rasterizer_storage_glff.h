@@ -102,20 +102,91 @@ public:
 	virtual RID sky_create() { return RID(); }
 	virtual void sky_set_texture(RID p_sky, RID p_cube_map, int p_radiance_size) {}
 
-	/* SHADER (stub -- this backend never compiles a shader, by design) */
+	/* SHADER -- real for Phase 4 (godot-ports#24), but only as a tiny
+	   render_mode-flag parser, never a real shader compiler. SpatialMaterial
+	   communicates cull_mode/blend_mode/unshaded/etc. exclusively by
+	   generating a real GLSL source string with a leading
+	   "render_mode a,b,c;" line and calling shader_set_code() with it
+	   (scene/resources/material.cpp's Material3D::_update_shader()) --
+	   there is no other path (these are NOT sent via material_set_param()).
+	   GLFF never compiles the shader body at all -- it just scans the
+	   render_mode line's comma-separated keyword list for the handful of
+	   tokens that map onto real fixed-function pipeline state, since that's
+	   the only way this backend can ever learn a material's cull/blend/
+	   unshaded/depth-test intent. */
+	enum GLFFCullMode {
+		GLFF_CULL_BACK,
+		GLFF_CULL_FRONT,
+		GLFF_CULL_DISABLED,
+	};
+	enum GLFFBlendMode {
+		GLFF_BLEND_MIX,
+		GLFF_BLEND_ADD,
+		GLFF_BLEND_SUB,
+		GLFF_BLEND_MUL,
+	};
 
-	// Never instantiated -- shader_create() always returns an invalid RID
-	// (no RID_Owner<Shader> exists), so no code ever gets a real pointer to
-	// one. Exists purely because drivers/gles_common/rasterizer_canvas_batcher.h
-	// (shared with GLES2/GLES3) declares a typename T_STORAGE::Shader
-	// pointer field for its per-item shader-change-tracking cache -- never
-	// dereferenced on this backend, since canvas_render_items_implementation()
-	// never sets it to anything but nullptr (see rasterizer_canvas_glff.cpp).
-	struct Shader {};
+	struct Shader : public RID_Data {
+		GLFFCullMode cull_mode;
+		GLFFBlendMode blend_mode;
+		bool unshaded;
+		bool depth_test_disabled;
+		String code;
 
-	virtual RID shader_create() { return RID(); }
-	virtual void shader_set_code(RID p_shader, const String &p_code) {}
-	virtual String shader_get_code(RID p_shader) const { return String(); }
+		Shader() {
+			cull_mode = GLFF_CULL_BACK;
+			blend_mode = GLFF_BLEND_MIX;
+			unshaded = false;
+			depth_test_disabled = false;
+		}
+	};
+	mutable RID_Owner<Shader> shader_owner;
+
+	virtual RID shader_create() {
+		Shader *s = memnew(Shader);
+		return shader_owner.make_rid(s);
+	}
+	virtual void shader_set_code(RID p_shader, const String &p_code) {
+		Shader *s = shader_owner.getornull(p_shader);
+		ERR_FAIL_COND(!s);
+		s->code = p_code;
+
+		// Pull out just the "render_mode a,b,c;" line's token list --
+		// everything else in p_code (uniform decls, vertex()/fragment()
+		// function bodies) is real GLSL this backend never compiles.
+		int rm_pos = p_code.find("render_mode");
+		if (rm_pos == -1) {
+			return;
+		}
+		int semi_pos = p_code.find(";", rm_pos);
+		String tokens = semi_pos == -1 ? p_code.substr(rm_pos + 11) : p_code.substr(rm_pos + 11, semi_pos - (rm_pos + 11));
+
+		if (tokens.find("cull_front") != -1) {
+			s->cull_mode = GLFF_CULL_FRONT;
+		} else if (tokens.find("cull_disabled") != -1) {
+			s->cull_mode = GLFF_CULL_DISABLED;
+		} else {
+			s->cull_mode = GLFF_CULL_BACK;
+		}
+
+		if (tokens.find("blend_add") != -1) {
+			s->blend_mode = GLFF_BLEND_ADD;
+		} else if (tokens.find("blend_sub") != -1) {
+			s->blend_mode = GLFF_BLEND_SUB;
+		} else if (tokens.find("blend_mul") != -1) {
+			s->blend_mode = GLFF_BLEND_MUL;
+		} else {
+			s->blend_mode = GLFF_BLEND_MIX;
+		}
+
+		s->unshaded = tokens.find("unshaded") != -1;
+		s->depth_test_disabled = tokens.find("depth_test_disable") != -1;
+	}
+	virtual String shader_get_code(RID p_shader) const {
+		Shader *s = shader_owner.getornull(p_shader);
+		ERR_FAIL_COND_V(!s, String());
+		return s->code;
+	}
 	virtual void shader_get_param_list(RID p_shader, List<PropertyInfo> *p_param_list) const {}
 	virtual void shader_set_default_texture_param(RID p_shader, const StringName &p_name, RID p_texture) {}
 	virtual RID shader_get_default_texture_param(RID p_shader, const StringName &p_name) const { return RID(); }
@@ -125,20 +196,18 @@ public:
 	virtual void set_shader_async_hidden_forbidden(bool p_forbidden) {}
 	virtual bool is_shader_async_hidden_forbidden() { return false; }
 
-	/* MATERIAL (stub for Phase 1 -- real SpatialMaterial/CanvasItemMaterial
-	   mapping per godot-ports#17's table is Phase 4's job) */
-
-	// Phase 4's job (godot-ports#17) is the full SpatialMaterial mapping
-	// table; for now, just the two params that matter to get a textured/
-	// tinted mesh on screen at all -- "albedo" (Color) and "texture_albedo"
-	// (RID, the only way SpatialMaterial hands a texture to a backend in
-	// this Godot version -- see scene/resources/material.cpp's
-	// shader_names->texture_names[TEXTURE_ALBEDO] = "texture_albedo",
-	// pushed via the same material_set_param() call, not a dedicated
-	// material_set_texture() -- this API has none).
+	/* MATERIAL -- Phase 4 (godot-ports#24) real for albedo color/texture
+	   (Phase 3) plus cull_mode/blend_mode/unshaded/depth_test_disabled
+	   (parsed off the linked Shader's render_mode line, see above). The
+	   rest of godot-ports#17's mapping table (PBR textures, non-Lambert/
+	   Blinn diffuse/specular modes, ambient_light_disabled, alpha
+	   scissor, point-size billboarding) stays unimplemented -- degrades
+	   to this same flat-albedo/no-special-state behavior, which is the
+	   documented fallback for all of those. */
 	struct Material : public RID_Data {
 		Color albedo;
 		RID albedo_texture;
+		RID shader;
 
 		Material() {
 			albedo = Color(1, 1, 1, 1);
@@ -151,8 +220,16 @@ public:
 		return material_owner.make_rid(m);
 	}
 	virtual void material_set_render_priority(RID p_material, int priority) {}
-	virtual void material_set_shader(RID p_shader_material, RID p_shader) {}
-	virtual RID material_get_shader(RID p_shader_material) const { return RID(); }
+	virtual void material_set_shader(RID p_shader_material, RID p_shader) {
+		Material *m = material_owner.getornull(p_shader_material);
+		ERR_FAIL_COND(!m);
+		m->shader = p_shader;
+	}
+	virtual RID material_get_shader(RID p_shader_material) const {
+		Material *m = material_owner.getornull(p_shader_material);
+		ERR_FAIL_COND_V(!m, RID());
+		return m->shader;
+	}
 	virtual void material_set_param(RID p_material, const StringName &p_param, const Variant &p_value) {
 		Material *m = material_owner.getornull(p_material);
 		ERR_FAIL_COND(!m);
