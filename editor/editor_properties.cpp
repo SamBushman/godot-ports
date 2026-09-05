@@ -180,7 +180,13 @@ void EditorPropertyTextEnum::_emit_changed_value(String p_string) {
 }
 
 void EditorPropertyTextEnum::_option_selected(int p_which) {
-	_emit_changed_value(option_button->get_item_text(p_which));
+	// Real value travels as item metadata (set in setup()/update_property()),
+	// decoupled from the displayed label -- supports "Label:value" hint
+	// tokens (e.g. "OpenGL 1.2:GLFF") without changing what actually gets
+	// stored on the property. Every item (including loose_mode's synthetic
+	// empty/custom-value entries) always has metadata set, so this works
+	// regardless of mode or list ordering.
+	_emit_changed_value(option_button->get_item_metadata(p_which));
 }
 
 void EditorPropertyTextEnum::_edit_custom_value() {
@@ -210,7 +216,7 @@ void EditorPropertyTextEnum::_custom_value_cancelled() {
 
 void EditorPropertyTextEnum::update_property() {
 	String current_value = get_edited_object()->get(get_edited_property());
-	int default_option = options.find(current_value);
+	int default_option = option_values.find(current_value);
 
 	// The list can change in the loose mode.
 	if (loose_mode) {
@@ -220,6 +226,7 @@ void EditorPropertyTextEnum::update_property() {
 		// Manually entered value.
 		if (default_option < 0 && !current_value.empty()) {
 			option_button->add_item(current_value, options.size() + 1001);
+			option_button->set_item_metadata(option_button->get_item_count() - 1, current_value);
 			option_button->select(0);
 
 			option_button->add_separator();
@@ -227,10 +234,12 @@ void EditorPropertyTextEnum::update_property() {
 
 		// Add an explicit empty value for clearing the property.
 		option_button->add_item("", options.size() + 1000);
+		option_button->set_item_metadata(option_button->get_item_count() - 1, "");
 
 		for (int i = 0; i < options.size(); i++) {
 			option_button->add_item(options[i], i);
-			if (options[i] == current_value) {
+			option_button->set_item_metadata(option_button->get_item_count() - 1, option_values[i]);
+			if (option_values[i] == current_value) {
 				option_button->select(option_button->get_item_count() - 1);
 			}
 		}
@@ -243,15 +252,30 @@ void EditorPropertyTextEnum::setup(const Vector<String> &p_options, bool p_loose
 	loose_mode = p_loose_mode;
 
 	options.clear();
+	option_values.clear();
 
 	if (loose_mode) {
 		// Add an explicit empty value for clearing the property in the loose mode.
 		option_button->add_item("", options.size() + 1000);
+		option_button->set_item_metadata(option_button->get_item_count() - 1, "");
 	}
 
 	for (int i = 0; i < p_options.size(); i++) {
-		options.push_back(p_options[i]);
-		option_button->add_item(p_options[i], i);
+		// Support "Label:value" tokens (e.g. "OpenGL 1.2:GLFF") so a hint
+		// string can show a friendlier name than the actual value stored
+		// on the property, without existing plain "value" tokens (no
+		// colon) anywhere else in the engine changing behavior at all.
+		String label = p_options[i];
+		String value = p_options[i];
+		int colon = p_options[i].find(":");
+		if (colon != -1) {
+			label = p_options[i].substr(0, colon);
+			value = p_options[i].substr(colon + 1, p_options[i].length() - colon - 1);
+		}
+		options.push_back(label);
+		option_values.push_back(value);
+		option_button->add_item(label, i);
+		option_button->set_item_metadata(option_button->get_item_count() - 1, value);
 	}
 
 	if (loose_mode) {

@@ -102,6 +102,11 @@ class EditorPropertyTextEnum : public EditorProperty {
 	Button *cancel_button;
 
 	Vector<String> options;
+	// Real stored/compared values, parallel to `options` (the displayed
+	// labels). Equal to `options` unless a hint token used "Label:value"
+	// syntax (e.g. "OpenGL 1.2:GLFF") to show a friendlier name than the
+	// actual property value -- see setup().
+	Vector<String> option_values;
 	bool loose_mode = false;
 
 	void _emit_changed_value(String p_string);

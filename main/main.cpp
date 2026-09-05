@@ -1165,7 +1165,12 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	OS::get_singleton()->set_cmdline(execpath, main_args);
 
 	GLOBAL_DEF_RST("rendering/quality/driver/driver_name", "GLES3");
-	ProjectSettings::get_singleton()->set_custom_property_info("rendering/quality/driver/driver_name", PropertyInfo(Variant::STRING, "rendering/quality/driver/driver_name", PROPERTY_HINT_ENUM, "GLES2,GLES3,GLFF"));
+	// "OpenGL 1.2:GLFF" -- Label:value syntax (EditorPropertyTextEnum,
+	// editor/editor_properties.cpp) shows a friendlier name in the
+	// Project Settings/Inspector dropdown while the actual stored value
+	// and --video-driver argument stay "GLFF" (unchanged, so existing
+	// project.godot files and command lines keep working).
+	ProjectSettings::get_singleton()->set_custom_property_info("rendering/quality/driver/driver_name", PropertyInfo(Variant::STRING, "rendering/quality/driver/driver_name", PROPERTY_HINT_ENUM, "GLES2,GLES3,OpenGL 1.2:GLFF"));
 	if (video_driver == "") {
 		video_driver = GLOBAL_GET("rendering/quality/driver/driver_name");
 	}

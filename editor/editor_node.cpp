@@ -6737,8 +6737,19 @@ EditorNode::EditorNode() {
 	String current_video_driver = OS::get_singleton()->get_video_driver_name(OS::get_singleton()->get_current_video_driver());
 	video_driver_current = 0;
 	for (int i = 0; i < video_drivers.get_slice_count(","); i++) {
-		String driver = video_drivers.get_slice(",", i);
-		video_driver->add_item(driver);
+		String token = video_drivers.get_slice(",", i);
+		// "Label:value" syntax (matches EditorPropertyTextEnum's Project
+		// Settings dropdown, editor/editor_properties.cpp) -- shows a
+		// friendlier name here too while the actual driver id compared
+		// against OS::get_video_driver_name() stays unchanged.
+		String label = token;
+		String driver = token;
+		int colon = token.find(":");
+		if (colon != -1) {
+			label = token.substr(0, colon);
+			driver = token.substr(colon + 1, token.length() - colon - 1);
+		}
+		video_driver->add_item(label);
 		video_driver->set_item_metadata(i, driver);
 
 		if (current_video_driver == driver) {
