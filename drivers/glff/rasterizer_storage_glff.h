@@ -3,6 +3,7 @@
 
 #include "core/rid.h"
 #include "servers/visual/rasterizer.h"
+#include <stdio.h>
 
 // Same platform GL header indirection GLES2 already uses successfully on
 // this hardware (drivers/gles2/shader_gles2.h) -- platform_config.h picks
@@ -762,6 +763,9 @@ public:
 				tex->gl_alloc_width = pot_w;
 				tex->gl_alloc_height = pot_h;
 			}
+			fprintf(stderr, "GLFF DEBUG: render_target_set_size rid=%p w=%d h=%d pot=%dx%d tex=%p tex_id=%u is_rt=%d\n",
+					(void *)rt, p_width, p_height, pot_w, pot_h, (void *)tex, tex ? (unsigned)tex->tex_id : 0, tex ? (int)tex->is_render_target : -1);
+			fflush(stderr);
 		}
 	}
 	// Called by RasterizerGLFF::set_current_render_target() right before
@@ -790,6 +794,10 @@ public:
 		// populated -- see the gl_alloc_width/height comment on Texture
 		// above for why the underlying storage may be larger.
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, rt->width, rt->height);
+		GLenum copy_err = glGetError();
+		fprintf(stderr, "GLFF DEBUG: copy_to_texture rid=%p tex_id=%u w=%d h=%d gl_alloc=%ux%u err=0x%x\n",
+				(void *)rt, (unsigned)tex->tex_id, rt->width, rt->height, tex->gl_alloc_width, tex->gl_alloc_height, (unsigned)copy_err);
+		fflush(stderr);
 	}
 	virtual RID render_target_get_texture(RID p_render_target) const {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);

@@ -2,6 +2,7 @@
 
 #include "core/os/os.h"
 #include "rasterizer_storage_glff.h"
+#include <stdio.h>
 
 void RasterizerCanvasGLFF::canvas_begin() {
 	// A plain glLoadIdentity() here left the projection matrix mapping only
@@ -161,6 +162,16 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 					} else {
 						glDisable(GL_TEXTURE_2D);
+					}
+					if (tex && tex->is_render_target) {
+						static int rt_draw_count = 0;
+						if (rt_draw_count < 20) {
+							rt_draw_count++;
+							fprintf(stderr, "GLFF DEBUG: TYPE_RECT drawing render-target tex tex_id=%u w=%u h=%u gl_alloc=%ux%u region_flag=%d rect=(%.1f,%.1f,%.1f,%.1f)\n",
+									(unsigned)tex->tex_id, tex->width, tex->height, tex->gl_alloc_width, tex->gl_alloc_height,
+									(int)((r->flags & CANVAS_RECT_REGION) != 0), r->rect.position.x, r->rect.position.y, r->rect.size.width, r->rect.size.height);
+							fflush(stderr);
+						}
 					}
 
 					Rect2 src = (r->flags & CANVAS_RECT_REGION) ? r->source : Rect2(0, 0, 1, 1);
