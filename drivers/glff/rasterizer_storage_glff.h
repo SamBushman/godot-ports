@@ -808,7 +808,11 @@ public:
 			while (pot_h < p_height) {
 				pot_h <<= 1;
 			}
-			texture_allocate(rt->texture, pot_w, pot_h, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
+			// TEMPORARY test (godot-ports#28): nearest instead of bilinear,
+			// to check whether thin gizmo-arrow geometry is being blurred
+			// to near-invisibility when the captured texture gets
+			// resampled for display.
+			texture_allocate(rt->texture, pot_w, pot_h, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, 0);
 			Texture *tex = texture_owner.getornull(rt->texture);
 			if (tex) {
 				tex->width = p_width;
