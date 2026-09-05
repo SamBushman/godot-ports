@@ -721,6 +721,8 @@ public:
 	virtual void render_target_set_size(RID p_render_target, int p_width, int p_height) {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
 		ERR_FAIL_COND(!rt);
+		fprintf(stderr, "GLFF DEBUG: render_target_set_size rt=%p old=%dx%d new=%dx%d\n", (void *)rt, rt->width, rt->height, p_width, p_height);
+		fflush(stderr);
 		if (rt->width == p_width && rt->height == p_height) {
 			return;
 		}
@@ -728,6 +730,9 @@ public:
 		rt->height = p_height;
 		if (p_width > 0 && p_height > 0) {
 			texture_allocate(rt->texture, p_width, p_height, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
+			Texture *tex = texture_owner.getornull(rt->texture);
+			fprintf(stderr, "GLFF DEBUG: render_target_set_size allocated tex=%p tex_id=%u active=%d fmt=%d\n", (void *)tex, tex ? (unsigned)tex->tex_id : 0, tex ? (int)tex->active : -1, tex ? (int)tex->format : -1);
+			fflush(stderr);
 		}
 	}
 	// Called by RasterizerGLFF::set_current_render_target() right before
