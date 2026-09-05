@@ -171,6 +171,20 @@ public:
 
 	virtual bool free(RID p_rid);
 
+	// Real hardware capability, detected once at initialize() by scanning
+	// GL_EXTENSIONS -- ARB_multitexture/ARB_texture_env_combine/
+	// ARB_texture_env_dot3 are all optional under this backend's strict
+	// GL 1.2 floor (see proposal §2), confirmed present on every chip
+	// this project has hardware-verified except Rage Pro (no dot3 at
+	// all) and Rage 128 (multitexture+combine, no dot3) -- see the
+	// godot-ports#25 research this FixedFunctionMaterial authoring
+	// surface (godot-ports#35) exists to expose. A FixedFunctionMaterial
+	// asking for Combine/Dot3 on hardware that lacks it degrades to
+	// GL_MODULATE on that unit rather than emitting an invalid enum.
+	bool has_multitexture;
+	bool has_texture_env_combine;
+	bool has_texture_env_dot3;
+
 	void initialize();
 
 	RasterizerSceneGLFF();

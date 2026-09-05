@@ -148,6 +148,7 @@
 #include "scene/resources/cylinder_shape.h"
 #include "scene/resources/default_theme/default_theme.h"
 #include "scene/resources/dynamic_font.h"
+#include "scene/resources/fixed_function_material.h"
 #include "scene/resources/gradient.h"
 #include "scene/resources/height_map_shape.h"
 #include "scene/resources/line_shape_2d.h"
@@ -675,6 +676,12 @@ void register_scene_types() {
 	ClassDB::register_virtual_class<Material3D>();
 	ClassDB::register_class<SpatialMaterial>();
 	ClassDB::register_class<ORMSpatialMaterial>();
+	// GLFF's fixed-function authoring surface (godot-ports#35) -- always
+	// registered (not conditional on the active video driver), same as
+	// every other Material subclass; it's simply a no-op on GLES2/GLES3
+	// since only GLFF's RasterizerStorageGLFF::material_set_param()
+	// recognizes its "ff_*" param names.
+	ClassDB::register_class<FixedFunctionMaterial>();
 	SceneTree::add_idle_callback(Material3D::flush_changes);
 	Material3D::init_shaders();
 

@@ -291,13 +291,48 @@ public:
 	   scissor, point-size billboarding) stays unimplemented -- degrades
 	   to this same flat-albedo/no-special-state behavior, which is the
 	   documented fallback for all of those. */
+	// Real fixed-function texture-unit combiner state for a
+	// FixedFunctionMaterial (godot-ports#35) -- driven entirely by
+	// material_set_param()'s "ff_*" well-known names below, since this
+	// material type never has a Shader at all (no GLSL, nothing to parse
+	// a render_mode line out of). env_mode/combine_func mirror
+	// FixedFunctionMaterial::EnvMode/CombineFunc numerically (both start
+	// at 0 with the same ordering) so the raw int can be used directly
+	// without a translation table.
+	static const int FF_TEXTURE_UNIT_MAX = 2;
 	struct Material : public RID_Data {
 		Color albedo;
 		RID albedo_texture;
 		RID shader;
 
+		// True only for a FixedFunctionMaterial (set via the "ff_active"
+		// param, always sent once by its constructor) -- when true,
+		// render_scene() drives real per-unit glTexEnvi/GL_COMBINE/
+		// GL_DOT3_RGB state from ff_tex/ff_env_mode/ff_combine_func
+		// instead of the single-albedo-texture SpatialMaterial path, and
+		// reads cull/blend/unshaded/depth-test from ff_cull_mode/
+		// ff_blend_mode/ff_unshaded/ff_depth_test_disabled directly
+		// (there's no Shader/render_mode string to parse those from here).
+		bool ff_active;
+		RID ff_tex[FF_TEXTURE_UNIT_MAX];
+		int ff_env_mode[FF_TEXTURE_UNIT_MAX];
+		int ff_combine_func[FF_TEXTURE_UNIT_MAX];
+		GLFFCullMode ff_cull_mode;
+		GLFFBlendMode ff_blend_mode;
+		bool ff_unshaded;
+		bool ff_depth_test_disabled;
+
 		Material() {
 			albedo = Color(1, 1, 1, 1);
+			ff_active = false;
+			for (int i = 0; i < FF_TEXTURE_UNIT_MAX; i++) {
+				ff_env_mode[i] = 0;
+				ff_combine_func[i] = 0;
+			}
+			ff_cull_mode = GLFF_CULL_BACK;
+			ff_blend_mode = GLFF_BLEND_MIX;
+			ff_unshaded = false;
+			ff_depth_test_disabled = false;
 		}
 	};
 	mutable RID_Owner<Material> material_owner;
@@ -324,6 +359,28 @@ public:
 			m->albedo = p_value;
 		} else if (p_param == StringName("texture_albedo")) {
 			m->albedo_texture = p_value;
+		} else if (p_param == StringName("ff_active")) {
+			m->ff_active = p_value;
+		} else if (p_param == StringName("ff_tex0")) {
+			m->ff_tex[0] = p_value;
+		} else if (p_param == StringName("ff_tex1")) {
+			m->ff_tex[1] = p_value;
+		} else if (p_param == StringName("ff_env_mode0")) {
+			m->ff_env_mode[0] = p_value;
+		} else if (p_param == StringName("ff_env_mode1")) {
+			m->ff_env_mode[1] = p_value;
+		} else if (p_param == StringName("ff_combine_func0")) {
+			m->ff_combine_func[0] = p_value;
+		} else if (p_param == StringName("ff_combine_func1")) {
+			m->ff_combine_func[1] = p_value;
+		} else if (p_param == StringName("ff_cull_mode")) {
+			m->ff_cull_mode = (GLFFCullMode)(int)p_value;
+		} else if (p_param == StringName("ff_blend_mode")) {
+			m->ff_blend_mode = (GLFFBlendMode)(int)p_value;
+		} else if (p_param == StringName("ff_unshaded")) {
+			m->ff_unshaded = p_value;
+		} else if (p_param == StringName("ff_depth_test_disabled")) {
+			m->ff_depth_test_disabled = p_value;
 		}
 	}
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const { return Variant(); }

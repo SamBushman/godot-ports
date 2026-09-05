@@ -1,7 +1,7 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
-#include <stdio.h>
+#include <string.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
 // confirms elements[row] is a ROW of the basis, i.e. elements[row].x/y/z
@@ -56,6 +56,87 @@ static GLenum _primitive_to_gl(VS::PrimitiveType p_primitive) {
 		case VS::PRIMITIVE_TRIANGLES:
 		default:
 			return GL_TRIANGLES;
+	}
+}
+
+// Mirrors FixedFunctionMaterial::EnvMode (scene/resources/fixed_function_material.h)
+// numerically -- drivers/ can't include scene/ headers, so the raw int
+// values are translated here instead. Keep these two enums in sync.
+static GLenum _ff_env_mode_to_gl(int p_mode) {
+	switch (p_mode) {
+		case 1: // ENV_REPLACE
+			return GL_REPLACE;
+		case 2: // ENV_DECAL
+			return GL_DECAL;
+		case 3: // ENV_BLEND
+			return GL_BLEND;
+		case 4: // ENV_COMBINE
+			return GL_COMBINE;
+		case 0: // ENV_MODULATE
+		default:
+			return GL_MODULATE;
+	}
+}
+
+// Mirrors FixedFunctionMaterial::CombineFunc numerically. Only reached
+// when env_mode is ENV_COMBINE and the driver actually has
+// GL_ARB_texture_env_combine (checked by the caller) -- DOT3 additionally
+// needs GL_ARB_texture_env_dot3, also checked by the caller, which
+// substitutes GL_MODULATE instead when absent (e.g. Rage Pro/128, see
+// godot-ports#25's hardware research) rather than emitting an enum the
+// driver would reject.
+static GLenum _ff_combine_func_to_gl(int p_func) {
+	switch (p_func) {
+		case 1: // COMBINE_ADD
+			return GL_ADD;
+		case 2: // COMBINE_SUBTRACT
+			return GL_SUBTRACT;
+		case 3: // COMBINE_DOT3
+			return GL_DOT3_RGB;
+		case 0: // COMBINE_MODULATE
+		default:
+			return GL_MODULATE;
+	}
+}
+
+// Sets up one texture unit's full fixed-function state (bind, env mode,
+// and -- when requested and available -- real GL_COMBINE/dot3 combiner
+// state) for godot-ports#35's FixedFunctionMaterial. p_gl_texture_unit is
+// GL_TEXTURE0/GL_TEXTURE1 for glActiveTexture/glClientActiveTexture;
+// p_second_operand_source is GL_PRIMARY_COLOR (unit 0, combining the
+// texture against the surface's own per-vertex color) or GL_PREVIOUS
+// (unit 1+, chaining against the prior stage's result) -- the standard
+// two-stage combiner pattern this authoring surface's first pass targets
+// (godot-ports#25's dot3 bump-mapping technique: a base/diffuse unit
+// feeding a normal-map unit in Combine+Dot3 mode).
+static void _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_texture_unit, GLenum p_second_operand_source, RasterizerStorageGLFF::Texture *p_tex, int p_env_mode, int p_combine_func) {
+	if (p_scene->has_multitexture) {
+		glActiveTexture(p_gl_texture_unit);
+		glClientActiveTexture(p_gl_texture_unit);
+	}
+
+	if (!p_tex) {
+		glDisable(GL_TEXTURE_2D);
+		return;
+	}
+
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, p_tex->tex_id);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+
+	if (p_env_mode == 4 /* ENV_COMBINE */ && p_scene->has_texture_env_combine) {
+		GLenum combine_func = _ff_combine_func_to_gl(p_combine_func);
+		if (combine_func == GL_DOT3_RGB && !p_scene->has_texture_env_dot3) {
+			combine_func = GL_MODULATE;
+		}
+		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_COMBINE);
+		glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, combine_func);
+		glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE);
+		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_COLOR);
+		glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, p_second_operand_source);
+		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
+	} else {
+		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, _ff_env_mode_to_gl(p_env_mode));
 	}
 }
 
@@ -253,14 +334,19 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				// maps, not approximations (SUB needs glBlendEquation, core
 				// GL 1.4 -- a real finding from the proposal's material
 				// research, not an oversight of the strict-1.2 floor).
+				// FixedFunctionMaterial (godot-ports#35) exposes this same
+				// blend_mode directly as its own property (criterion 4) --
+				// mat->ff_blend_mode, not a Shader/render_mode string, since
+				// this material type never has a Shader at all.
+				RasterizerStorageGLFF::GLFFBlendMode effective_blend_mode = (mat && mat->ff_active) ? mat->ff_blend_mode : (shader ? shader->blend_mode : RasterizerStorageGLFF::GLFF_BLEND_MIX);
 				glBlendEquation(GL_FUNC_ADD);
-				if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_ADD) {
+				if (effective_blend_mode == RasterizerStorageGLFF::GLFF_BLEND_ADD) {
 					glEnable(GL_BLEND);
 					glBlendFunc(GL_SRC_ALPHA, GL_ONE);
-				} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_MUL) {
+				} else if (effective_blend_mode == RasterizerStorageGLFF::GLFF_BLEND_MUL) {
 					glEnable(GL_BLEND);
 					glBlendFunc(GL_DST_COLOR, GL_ZERO);
-				} else if (shader && shader->blend_mode == RasterizerStorageGLFF::GLFF_BLEND_SUB) {
+				} else if (effective_blend_mode == RasterizerStorageGLFF::GLFF_BLEND_SUB) {
 					glEnable(GL_BLEND);
 					glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
 					glBlendFunc(GL_SRC_ALPHA, GL_ONE);
@@ -289,17 +375,20 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				// as the camera rotates, with no visible size change --
 				// classic binary backface-cull behavior, not a scale/culling-
 				// frustum/depth issue (all independently ruled out first).
-				if (shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
+				RasterizerStorageGLFF::GLFFCullMode effective_cull_mode = (mat && mat->ff_active) ? mat->ff_cull_mode : (shader ? shader->cull_mode : RasterizerStorageGLFF::GLFF_CULL_BACK);
+				bool effective_unshaded_for_cull = (mat && mat->ff_active) ? mat->ff_unshaded : (shader && shader->unshaded);
+				if (effective_cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
 					glEnable(GL_CULL_FACE);
 					glCullFace(GL_FRONT);
-				} else if ((shader && shader->cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) || (shader && shader->unshaded)) {
+				} else if (effective_cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED || effective_unshaded_for_cull) {
 					glDisable(GL_CULL_FACE);
 				} else {
 					glEnable(GL_CULL_FACE);
 					glCullFace(GL_BACK);
 				}
 
-				if (shader && shader->depth_test_disabled) {
+				bool effective_depth_test_disabled = (mat && mat->ff_active) ? mat->ff_depth_test_disabled : (shader && shader->depth_test_disabled);
+				if (effective_depth_test_disabled) {
 					glDisable(GL_DEPTH_TEST);
 				} else {
 					glEnable(GL_DEPTH_TEST);
@@ -307,7 +396,10 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 
 				// FLAG_UNSHADED: this surface ignores GL_LIGHT0-7 regardless
 				// of whether lighting is on for the rest of the scene.
-				bool surface_unshaded = shader && shader->unshaded;
+				// FixedFunctionMaterial (godot-ports#35) exposes this
+				// directly too (mat->ff_unshaded), same reasoning as
+				// blend/cull above.
+				bool surface_unshaded = (mat && mat->ff_active) ? mat->ff_unshaded : (shader && shader->unshaded);
 				if (surface_unshaded) {
 					glDisable(GL_LIGHTING);
 				} else if (max_lights > 0) {
@@ -350,7 +442,44 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				}
 
 				PoolVector<Vector2>::Read ur;
-				if (surface->has_uvs && tex) {
+				bool used_texture_unit_1 = false;
+				if (mat && mat->ff_active) {
+					// godot-ports#35: FixedFunctionMaterial's real
+					// multi-texture-unit path. Both units (when unit 1 is
+					// actually usable) sample the SAME uv set -- this
+					// first pass targets exactly the classic dot3
+					// bump-mapping layout (base color + normal map at the
+					// same UV coordinates), not independent UV2-style
+					// per-unit coordinates.
+					if (surface->has_uvs) {
+						ur = surface->uvs.read();
+					}
+
+					RasterizerStorageGLFF::Texture *ff_tex0 = mat->ff_tex[0].is_valid() ? storage->texture_owner.getornull(mat->ff_tex[0]) : nullptr;
+					if (ff_tex0) {
+						ff_tex0 = ff_tex0->get_ptr();
+					}
+					_ff_setup_texture_unit(this, GL_TEXTURE0, GL_PRIMARY_COLOR, ff_tex0, mat->ff_env_mode[0], mat->ff_combine_func[0]);
+					if (ff_tex0 && surface->has_uvs) {
+						glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
+					} else {
+						glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+					}
+
+					if (has_multitexture) {
+						RasterizerStorageGLFF::Texture *ff_tex1 = mat->ff_tex[1].is_valid() ? storage->texture_owner.getornull(mat->ff_tex[1]) : nullptr;
+						if (ff_tex1) {
+							ff_tex1 = ff_tex1->get_ptr();
+						}
+						_ff_setup_texture_unit(this, GL_TEXTURE1, GL_PREVIOUS, ff_tex1, mat->ff_env_mode[1], mat->ff_combine_func[1]);
+						if (ff_tex1 && surface->has_uvs) {
+							glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
+							used_texture_unit_1 = true;
+						} else {
+							glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+						}
+					}
+				} else if (surface->has_uvs && tex) {
 					glEnable(GL_TEXTURE_2D);
 					glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 					glBindTexture(GL_TEXTURE_2D, tex->tex_id);
@@ -370,6 +499,15 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
 				} else {
 					glDrawArrays(gl_primitive, 0, surface->vertex_count);
+				}
+
+				// Leave texture-unit state back at unit 0 for every other
+				// code path (2D canvas rendering, other materials in this
+				// same pass) that assumes GL_TEXTURE0 is always the active
+				// unit and never touches multitexture at all.
+				if (has_multitexture && (used_texture_unit_1 || (mat && mat->ff_active))) {
+					glClientActiveTexture(GL_TEXTURE0);
+					glActiveTexture(GL_TEXTURE0);
 				}
 			}
 
@@ -431,6 +569,14 @@ void RasterizerSceneGLFF::initialize() {
 	// default CCW -- without this, render_scene()'s GL_CULL_FACE/GL_BACK
 	// setup culls the real front faces and shows back faces instead.
 	glFrontFace(GL_CW);
+
+	// godot-ports#35: real capability check, not an assumption -- see the
+	// has_multitexture/has_texture_env_combine/has_texture_env_dot3
+	// comment in the header for why these specific three extensions.
+	const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+	has_multitexture = ext && strstr(ext, "GL_ARB_multitexture") != nullptr;
+	has_texture_env_combine = ext && (strstr(ext, "GL_ARB_texture_env_combine") != nullptr || strstr(ext, "GL_EXT_texture_env_combine") != nullptr);
+	has_texture_env_dot3 = ext && (strstr(ext, "GL_ARB_texture_env_dot3") != nullptr || strstr(ext, "GL_EXT_texture_env_dot3") != nullptr);
 }
 
 RasterizerSceneGLFF::RasterizerSceneGLFF() {
