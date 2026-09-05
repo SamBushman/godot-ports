@@ -204,6 +204,15 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				continue;
 			}
 
+			// TEMPORARY isolation test (godot-ports#28): skip every surface
+			// that isn't the gizmo-arrow geometry (vertex_count == 384,
+			// confirmed via prior tracing), to check whether the gizmo
+			// renders correctly when nothing else in the scene (ground,
+			// player mesh, grid) is drawn alongside it.
+			if (surface->vertex_count != 384) {
+				continue;
+			}
+
 			RID mat_rid = instance->material_override.is_valid() ? instance->material_override : ((s < instance->materials.size() && instance->materials[s].is_valid()) ? instance->materials[s] : surface->material);
 			RasterizerStorageGLFF::Material *mat = storage->material_owner.getornull(mat_rid);
 			Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
