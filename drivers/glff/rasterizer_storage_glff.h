@@ -3,7 +3,6 @@
 
 #include "core/rid.h"
 #include "servers/visual/rasterizer.h"
-#include <stdio.h>
 
 // Same platform GL header indirection GLES2 already uses successfully on
 // this hardware (drivers/gles2/shader_gles2.h) -- platform_config.h picks
@@ -60,6 +59,25 @@ public:
 		// pass itself, so the already-verified-correct main-viewport
 		// rendering stays completely untouched (godot-ports#28).
 		bool is_render_target;
+		// Real GL texture storage dimensions when they differ from the
+		// logical width/height above -- only ever set for is_render_target
+		// textures. This driver (ATI/Mesa GL 1.2, no
+		// GL_ARB_texture_non_power_of_two) rejects glTexImage2D outright
+		// (GL_INVALID_VALUE) for non-power-of-two sizes, which is most
+		// render targets (a 716x822 editor viewport panel, the 1280x980
+		// main window, etc.) -- confirmed via a standalone GL repro,
+		// godot-ports#28. Fix: allocate the real GL texture at the next
+		// POT size (gl_alloc_width/height) and only ever populate its
+		// top-left width x height sub-rect via glCopyTexSubImage2D; the
+		// logical width/height stays the real requested size so the rest
+		// of the engine (UI layout, aspect-ratio math) sees the correct
+		// value. Sampling code must scale UVs by
+		// (width/gl_alloc_width, height/gl_alloc_height) to stay within
+		// the populated sub-rect -- see the is_render_target handling in
+		// rasterizer_canvas_glff.cpp. Zero means "no padding" (ordinary
+		// textures, and any render target whose size already happens to
+		// be POT).
+		uint32_t gl_alloc_width, gl_alloc_height;
 
 		Texture() {
 			width = height = depth = 0;
@@ -70,6 +88,7 @@ public:
 			data_size = 0;
 			active = false;
 			is_render_target = false;
+			gl_alloc_width = gl_alloc_height = 0;
 		}
 	};
 
@@ -721,18 +740,28 @@ public:
 	virtual void render_target_set_size(RID p_render_target, int p_width, int p_height) {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
 		ERR_FAIL_COND(!rt);
-		fprintf(stderr, "GLFF DEBUG: render_target_set_size rt=%p old=%dx%d new=%dx%d\n", (void *)rt, rt->width, rt->height, p_width, p_height);
-		fflush(stderr);
 		if (rt->width == p_width && rt->height == p_height) {
 			return;
 		}
 		rt->width = p_width;
 		rt->height = p_height;
 		if (p_width > 0 && p_height > 0) {
-			texture_allocate(rt->texture, p_width, p_height, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
+			int pot_w = 1;
+			while (pot_w < p_width) {
+				pot_w <<= 1;
+			}
+			int pot_h = 1;
+			while (pot_h < p_height) {
+				pot_h <<= 1;
+			}
+			texture_allocate(rt->texture, pot_w, pot_h, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
 			Texture *tex = texture_owner.getornull(rt->texture);
-			fprintf(stderr, "GLFF DEBUG: render_target_set_size allocated tex=%p tex_id=%u active=%d fmt=%d\n", (void *)tex, tex ? (unsigned)tex->tex_id : 0, tex ? (int)tex->active : -1, tex ? (int)tex->format : -1);
-			fflush(stderr);
+			if (tex) {
+				tex->width = p_width;
+				tex->height = p_height;
+				tex->gl_alloc_width = pot_w;
+				tex->gl_alloc_height = pot_h;
+			}
 		}
 	}
 	// Called by RasterizerGLFF::set_current_render_target() right before
@@ -742,14 +771,10 @@ public:
 	// no-FBO floor.
 	void render_target_copy_to_texture(RID p_render_target) {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
-		fprintf(stderr, "GLFF DEBUG: copy_to_texture rt=%p w=%d h=%d\n", (void *)rt, rt ? rt->width : -1, rt ? rt->height : -1);
-		fflush(stderr);
 		if (!rt || rt->width <= 0 || rt->height <= 0) {
 			return;
 		}
 		Texture *tex = texture_owner.getornull(rt->texture);
-		fprintf(stderr, "GLFF DEBUG: copy_to_texture tex=%p tex_id=%u\n", (void *)tex, tex ? (unsigned)tex->tex_id : 0);
-		fflush(stderr);
 		if (!tex) {
 			return;
 		}
@@ -758,20 +783,13 @@ public:
 		// an error from some earlier, unrelated engine GL call would be
 		// misattributed to this copy (a real gotcha already hit once
 		// earlier this project, see feedback_opengl_graphics_debugging).
-		int drained = 0;
 		while (glGetError() != GL_NO_ERROR) {
-			drained++;
 		}
-		fprintf(stderr, "GLFF DEBUG: drained %d backlogged errors before copy\n", drained);
-		fflush(stderr);
 		glBindTexture(GL_TEXTURE_2D, tex->tex_id);
-		GLenum bind_err = glGetError();
-		fprintf(stderr, "GLFF DEBUG: glBindTexture err=0x%x\n", bind_err);
-		fflush(stderr);
+		// Only the real (logical, possibly non-POT) width/height is ever
+		// populated -- see the gl_alloc_width/height comment on Texture
+		// above for why the underlying storage may be larger.
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, rt->width, rt->height);
-		GLenum err = glGetError();
-		fprintf(stderr, "GLFF DEBUG: copy_to_texture glGetError=0x%x\n", err);
-		fflush(stderr);
 	}
 	virtual RID render_target_get_texture(RID p_render_target) const {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);

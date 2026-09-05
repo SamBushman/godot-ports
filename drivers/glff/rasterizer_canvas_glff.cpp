@@ -173,6 +173,22 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						v0 /= tex->height;
 						v1 /= tex->height;
 					}
+					if (tex && tex->is_render_target && tex->gl_alloc_width > 0 && tex->gl_alloc_height > 0) {
+						// This driver has no GL_ARB_texture_non_power_of_two,
+						// so render targets whose logical size isn't already
+						// POT are backed by a larger, POT-rounded GL texture
+						// with only the top-left width x height sub-rect
+						// ever populated (see the gl_alloc_width/height
+						// comment on Texture in rasterizer_storage_glff.h,
+						// godot-ports#28) -- rescale the logical 0..1 UV
+						// range down to that populated sub-rect.
+						float scale_u = (float)tex->width / (float)tex->gl_alloc_width;
+						float scale_v = (float)tex->height / (float)tex->gl_alloc_height;
+						u0 *= scale_u;
+						u1 *= scale_u;
+						v0 *= scale_v;
+						v1 *= scale_v;
+					}
 					if (r->flags & CANVAS_RECT_FLIP_H) {
 						SWAP(u0, u1);
 					}

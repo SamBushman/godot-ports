@@ -1,7 +1,6 @@
 #include "rasterizer_glff.h"
 
 #include "core/os/os.h"
-#include <stdio.h>
 
 RasterizerStorage *RasterizerGLFF::get_storage() {
 	return storage;
@@ -62,26 +61,17 @@ void RasterizerGLFF::set_current_render_target(RID p_render_target) {
 	// own 3D panel, camera previews, minimaps) work at all; see the
 	// RenderTarget comment in rasterizer_storage_glff.h for the full
 	// reasoning (godot-ports#28).
-	Size2 real_window_size = OS::get_singleton()->get_window_size();
-	fprintf(stderr, "GLFF DEBUG: real window size w=%d h=%d\n", (int)real_window_size.width, (int)real_window_size.height);
-	fflush(stderr);
 	if (current_render_target.is_valid()) {
-		fprintf(stderr, "GLFF DEBUG: capturing prev target %s\n", current_render_target.get_id() != 0 ? "valid" : "invalid");
-		fflush(stderr);
 		storage->render_target_copy_to_texture(current_render_target);
 	}
 	current_render_target = p_render_target;
 
 	if (p_render_target.is_valid()) {
 		RasterizerStorageGLFF::RenderTarget *rt = storage->render_target_owner.getornull(p_render_target);
-		fprintf(stderr, "GLFF DEBUG: set_current_render_target valid rid, rt=%p w=%d h=%d\n", (void *)rt, rt ? rt->width : -1, rt ? rt->height : -1);
-		fflush(stderr);
 		if (rt) {
 			glViewport(0, 0, rt->width, rt->height);
 		}
 	} else {
-		fprintf(stderr, "GLFF DEBUG: set_current_render_target invalid rid (screen)\n");
-		fflush(stderr);
 		Size2 window_size = OS::get_singleton()->get_window_size();
 		glViewport(0, 0, window_size.width, window_size.height);
 	}
