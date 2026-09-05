@@ -1,5 +1,7 @@
 #include "rasterizer_storage_glff.h"
 
+#include <stdio.h>
+
 #include "core/math/math_funcs.h"
 #include "core/os/os.h"
 #include "core/project_settings.h"
@@ -78,7 +80,16 @@ void RasterizerStorageGLFF::texture_allocate(RID p_texture, int p_width, int p_h
 	// 1.2 (no SGIS_generate_mipmap/glGenerateMipmap assumed, see proposal
 	// §2) -- CPU-side mip generation is deferred to whichever phase needs
 	// filtered minification; base level alone is enough to compile/display.
+	while (glGetError() != GL_NO_ERROR) {}
 	glTexImage2D(GL_TEXTURE_2D, 0, gl_internal_format, p_width, p_height, 0, gl_format, gl_type, nullptr);
+	{
+		GLenum alloc_err = glGetError();
+		fprintf(stderr, "GLFF DEBUG: texture_allocate w=%d h=%d pot=%d glTexImage2D err=0x%x\n",
+				p_width, p_height,
+				(int)(((p_width & (p_width - 1)) == 0) && ((p_height & (p_height - 1)) == 0)),
+				(unsigned)alloc_err);
+		fflush(stderr);
+	}
 
 	GLenum wrap = (p_flags & VS::TEXTURE_FLAG_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);

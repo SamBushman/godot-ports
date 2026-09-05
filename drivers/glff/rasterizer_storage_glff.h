@@ -729,11 +729,7 @@ public:
 		rt->width = p_width;
 		rt->height = p_height;
 		if (p_width > 0 && p_height > 0) {
-			// TEMPORARY test: RGB8 instead of RGBA8, to check whether the
-			// main window's real framebuffer lacks an alpha channel (making
-			// it copy-incompatible with an RGBA8 destination under strict
-			// GL rules) -- investigation for godot-ports#28.
-			texture_allocate(rt->texture, p_width, p_height, 0, Image::FORMAT_RGB8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
+			texture_allocate(rt->texture, p_width, p_height, 0, Image::FORMAT_RGBA8, VS::TEXTURE_TYPE_2D, VS::TEXTURE_FLAG_FILTER);
 			Texture *tex = texture_owner.getornull(rt->texture);
 			fprintf(stderr, "GLFF DEBUG: render_target_set_size allocated tex=%p tex_id=%u active=%d fmt=%d\n", (void *)tex, tex ? (unsigned)tex->tex_id : 0, tex ? (int)tex->active : -1, tex ? (int)tex->format : -1);
 			fflush(stderr);
