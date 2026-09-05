@@ -340,19 +340,46 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 
 			bool trace_this = (surface->vertex_count == 384);
 			if (trace_this) {
-				while (glGetError() != GL_NO_ERROR) {
-				}
-				GLboolean cull_en = glIsEnabled(GL_CULL_FACE);
-				GLboolean depth_en = glIsEnabled(GL_DEPTH_TEST);
-				GLint cull_mode_gl = 0;
-				glGetIntegerv(GL_CULL_FACE_MODE, &cull_mode_gl);
 				GLfloat mv[16];
 				glGetFloatv(GL_MODELVIEW_MATRIX, mv);
+
+				// Find the vertex farthest from the local origin -- for this
+				// arrow-cone geometry that's the tip/apex -- to directly
+				// test the "gizmo scale places 2 of 3 axes' geometry
+				// outside the view frustum" hypothesis (godot-ports#28):
+				// transform it through the full MVP and check its clip-
+				// space coordinates against the standard -w..w frustum
+				// bounds, rather than continuing to infer this indirectly.
+				PoolVector<Vector3>::Read vr2 = surface->vertices.read();
+				int farthest_idx = 0;
+				float farthest_d2 = 0;
+				for (int vi = 0; vi < surface->vertex_count; vi++) {
+					float d2 = vr2[vi].length_squared();
+					if (d2 > farthest_d2) {
+						farthest_d2 = d2;
+						farthest_idx = vi;
+					}
+				}
+				Vector3 tip = vr2[farthest_idx];
+
+				// mv is column-major (GL convention): eye = mv * local.
+				float ex = mv[0] * tip.x + mv[4] * tip.y + mv[8] * tip.z + mv[12];
+				float ey = mv[1] * tip.x + mv[5] * tip.y + mv[9] * tip.z + mv[13];
+				float ez = mv[2] * tip.x + mv[6] * tip.y + mv[10] * tip.z + mv[14];
+				float ew = mv[3] * tip.x + mv[7] * tip.y + mv[11] * tip.z + mv[15];
+				// gl_proj (declared at the top of render_scene()) is also
+				// column-major.
+				float cx = gl_proj[0] * ex + gl_proj[4] * ey + gl_proj[8] * ez + gl_proj[12] * ew;
+				float cy = gl_proj[1] * ex + gl_proj[5] * ey + gl_proj[9] * ez + gl_proj[13] * ew;
+				float cz = gl_proj[2] * ex + gl_proj[6] * ey + gl_proj[10] * ez + gl_proj[14] * ew;
+				float cw = gl_proj[3] * ex + gl_proj[7] * ey + gl_proj[11] * ez + gl_proj[15] * ew;
+
 				static long frame_counter = 0;
 				frame_counter++;
-				fprintf(stderr, "GLFF DEBUG: gizmo-arrow frame=%ld inst=%p cull_en=%d cull_mode=0x%x depth_en=%d mv_diag=(%.4f,%.4f,%.4f) mv_origin=(%.3f,%.3f,%.3f)\n",
-						frame_counter, (void *)instance, (int)cull_en, cull_mode_gl, (int)depth_en,
-						mv[0], mv[5], mv[10], mv[12], mv[13], mv[14]);
+				fprintf(stderr, "GLFF DEBUG: gizmo-arrow frame=%ld inst=%p albedo=(%.2f,%.2f,%.2f) tip_local=(%.3f,%.3f,%.3f) clip=(%.2f,%.2f,%.2f,%.2f) ndc=(%.2f,%.2f,%.2f)\n",
+						frame_counter, (void *)instance, albedo.r, albedo.g, albedo.b,
+						tip.x, tip.y, tip.z, cx, cy, cz, cw,
+						cw != 0 ? cx / cw : 0, cw != 0 ? cy / cw : 0, cw != 0 ? cz / cw : 0);
 				fflush(stderr);
 			}
 
