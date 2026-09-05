@@ -204,15 +204,18 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				continue;
 			}
 
-			// TEMPORARY incremental isolation test (godot-ports#28): the
-			// gizmo-only build rendered reliably (confirmed by the user).
-			// Adding back the grid + global origin-axis lines next (both
-			// use PRIMITIVE_LINES, unlike the ground/player mesh's
-			// triangles and the gizmo's own 384-vert triangles) to narrow
-			// down which specific scene element the gizmo conflicts with.
+			// TEMPORARY incremental isolation test (godot-ports#28): gizmo-
+			// only, then gizmo+grid+origin-lines, both confirmed reliable
+			// by the user. Adding back the Ground CubeMesh next (a
+			// standard Godot PrimitiveMesh cube, exactly 24 verts -- 4 per
+			// face x 6 faces -- confirmed via Main.tscn's
+			// SubResource(CubeMesh, size 60x2x60)) while still excluding
+			// the Player/Mob character meshes (hundreds+ verts from
+			// imported .glb data) to narrow down the conflict further.
 			bool is_gizmo_arrow = (surface->vertex_count == 384);
 			bool is_grid_or_origin_lines = (surface->primitive == VS::PRIMITIVE_LINES);
-			if (!is_gizmo_arrow && !is_grid_or_origin_lines) {
+			bool is_ground_cube = (surface->vertex_count == 24);
+			if (!is_gizmo_arrow && !is_grid_or_origin_lines && !is_ground_cube) {
 				continue;
 			}
 
