@@ -1,6 +1,7 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
+#include <stdio.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
 // confirms elements[row] is a ROW of the basis, i.e. elements[row].x/y/z
@@ -214,6 +215,29 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				tex = tex->get_ptr();
 			}
 			RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? storage->shader_owner.getornull(mat->shader) : nullptr;
+
+			{
+				static unsigned seen_mats[128];
+				static int seen_count = 0;
+				unsigned this_id = mat_rid.get_id();
+				bool already_seen = false;
+				for (int si = 0; si < seen_count; si++) {
+					if (seen_mats[si] == this_id) {
+						already_seen = true;
+						break;
+					}
+				}
+				if (!already_seen && seen_count < 128 && surface->vertex_count < 2000) {
+					seen_mats[seen_count++] = this_id;
+					fprintf(stderr, "GLFF DEBUG: small-mesh surface mat_rid=%u vcount=%d shader=%p depth_test_disabled=%d cull_mode=%d unshaded=%d albedo=(%.2f,%.2f,%.2f,%.2f)\n",
+							this_id, surface->vertex_count, (void *)shader,
+							shader ? (int)shader->depth_test_disabled : -1,
+							shader ? (int)shader->cull_mode : -1,
+							shader ? (int)shader->unshaded : -1,
+							albedo.r, albedo.g, albedo.b, albedo.a);
+					fflush(stderr);
+				}
+			}
 
 			glColor4f(albedo.r, albedo.g, albedo.b, albedo.a);
 			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, albedo.a };
