@@ -3,6 +3,7 @@
 
 #include "core/rid.h"
 #include "servers/visual/rasterizer.h"
+#include <stdio.h>
 
 // Same platform GL header indirection GLES2 already uses successfully on
 // this hardware (drivers/gles2/shader_gles2.h) -- platform_config.h picks
@@ -736,15 +737,22 @@ public:
 	// no-FBO floor.
 	void render_target_copy_to_texture(RID p_render_target) {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
+		fprintf(stderr, "GLFF DEBUG: copy_to_texture rt=%p w=%d h=%d\n", (void *)rt, rt ? rt->width : -1, rt ? rt->height : -1);
+		fflush(stderr);
 		if (!rt || rt->width <= 0 || rt->height <= 0) {
 			return;
 		}
 		Texture *tex = texture_owner.getornull(rt->texture);
+		fprintf(stderr, "GLFF DEBUG: copy_to_texture tex=%p tex_id=%u\n", (void *)tex, tex ? (unsigned)tex->tex_id : 0);
+		fflush(stderr);
 		if (!tex) {
 			return;
 		}
 		glBindTexture(GL_TEXTURE_2D, tex->tex_id);
 		glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, rt->width, rt->height);
+		GLenum err = glGetError();
+		fprintf(stderr, "GLFF DEBUG: copy_to_texture glGetError=0x%x\n", err);
+		fflush(stderr);
 	}
 	virtual RID render_target_get_texture(RID p_render_target) const {
 		RenderTarget *rt = render_target_owner.getornull(p_render_target);
