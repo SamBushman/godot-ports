@@ -185,6 +185,18 @@ public:
 	bool has_texture_env_combine;
 	bool has_texture_env_dot3;
 
+	// Real max texture units this GL context actually supports (queried
+	// via glGetIntegerv(GL_MAX_TEXTURE_UNITS) when has_multitexture, else
+	// 1) -- render_scene() never issues a unit beyond this regardless of
+	// what a FixedFunctionMaterial or its project target-GPU tier declare.
+	int max_texture_units;
+
+	// GL_REFLECTION_MAP texgen -- core since GL 1.3, also available as
+	// GL_NV_texgen_reflection on older hardware (godot-ports#25/#32
+	// research). GL_SPHERE_MAP/GL_OBJECT_LINEAR/GL_EYE_LINEAR texgen are
+	// all core since GL 1.0 and need no capability gate.
+	bool has_texgen_reflection_map;
+
 	void initialize();
 
 	RasterizerSceneGLFF();

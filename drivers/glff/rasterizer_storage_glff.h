@@ -295,11 +295,22 @@ public:
 	// FixedFunctionMaterial (godot-ports#35) -- driven entirely by
 	// material_set_param()'s "ff_*" well-known names below, since this
 	// material type never has a Shader at all (no GLSL, nothing to parse
-	// a render_mode line out of). env_mode/combine_func mirror
-	// FixedFunctionMaterial::EnvMode/CombineFunc numerically (both start
-	// at 0 with the same ordering) so the raw int can be used directly
-	// without a translation table.
-	static const int FF_TEXTURE_UNIT_MAX = 2;
+	// a render_mode line out of). env_mode/combine_func/texgen_mode mirror
+	// FixedFunctionMaterial::EnvMode/CombineFunc/TexgenMode numerically
+	// (both start at 0 with the same ordering) so the raw int can be used
+	// directly without a translation table. FF_TEXTURE_UNIT_MAX (4) is a
+	// fixed authoring-surface ceiling, not a live GL_MAX_TEXTURE_UNITS
+	// query -- how many of these units are actually usable/exposed in the
+	// Inspector for a given asset is instead driven by the project's
+	// target-GPU tier setting (rendering/quality/gl_fixed_function/target_gpu),
+	// consistent with this project's decision to gate capability off a
+	// declared target rather than the editing machine's own GPU (see
+	// FixedFunctionMaterial::_validate_property()). render_scene() still
+	// double-checks against real detected hardware capability
+	// (has_multitexture/has_texture_env_combine/has_texture_env_dot3/
+	// has_texgen_reflection_map) before ever issuing a GL call for a unit
+	// beyond what's actually present, regardless of the declared tier.
+	static const int FF_TEXTURE_UNIT_MAX = 4;
 	struct Material : public RID_Data {
 		Color albedo;
 		RID albedo_texture;
@@ -308,15 +319,17 @@ public:
 		// True only for a FixedFunctionMaterial (set via the "ff_active"
 		// param, always sent once by its constructor) -- when true,
 		// render_scene() drives real per-unit glTexEnvi/GL_COMBINE/
-		// GL_DOT3_RGB state from ff_tex/ff_env_mode/ff_combine_func
-		// instead of the single-albedo-texture SpatialMaterial path, and
-		// reads cull/blend/unshaded/depth-test from ff_cull_mode/
-		// ff_blend_mode/ff_unshaded/ff_depth_test_disabled directly
-		// (there's no Shader/render_mode string to parse those from here).
+		// GL_DOT3_RGB/glTexGeni state from ff_tex/ff_env_mode/
+		// ff_combine_func/ff_texgen_mode instead of the single-albedo-
+		// texture SpatialMaterial path, and reads cull/blend/unshaded/
+		// depth-test from ff_cull_mode/ff_blend_mode/ff_unshaded/
+		// ff_depth_test_disabled directly (there's no Shader/render_mode
+		// string to parse those from here).
 		bool ff_active;
 		RID ff_tex[FF_TEXTURE_UNIT_MAX];
 		int ff_env_mode[FF_TEXTURE_UNIT_MAX];
 		int ff_combine_func[FF_TEXTURE_UNIT_MAX];
+		int ff_texgen_mode[FF_TEXTURE_UNIT_MAX];
 		GLFFCullMode ff_cull_mode;
 		GLFFBlendMode ff_blend_mode;
 		bool ff_unshaded;
@@ -328,6 +341,7 @@ public:
 			for (int i = 0; i < FF_TEXTURE_UNIT_MAX; i++) {
 				ff_env_mode[i] = 0;
 				ff_combine_func[i] = 0;
+				ff_texgen_mode[i] = 0;
 			}
 			ff_cull_mode = GLFF_CULL_BACK;
 			ff_blend_mode = GLFF_BLEND_MIX;
@@ -361,18 +375,6 @@ public:
 			m->albedo_texture = p_value;
 		} else if (p_param == StringName("ff_active")) {
 			m->ff_active = p_value;
-		} else if (p_param == StringName("ff_tex0")) {
-			m->ff_tex[0] = p_value;
-		} else if (p_param == StringName("ff_tex1")) {
-			m->ff_tex[1] = p_value;
-		} else if (p_param == StringName("ff_env_mode0")) {
-			m->ff_env_mode[0] = p_value;
-		} else if (p_param == StringName("ff_env_mode1")) {
-			m->ff_env_mode[1] = p_value;
-		} else if (p_param == StringName("ff_combine_func0")) {
-			m->ff_combine_func[0] = p_value;
-		} else if (p_param == StringName("ff_combine_func1")) {
-			m->ff_combine_func[1] = p_value;
 		} else if (p_param == StringName("ff_cull_mode")) {
 			m->ff_cull_mode = (GLFFCullMode)(int)p_value;
 		} else if (p_param == StringName("ff_blend_mode")) {
@@ -381,6 +383,38 @@ public:
 			m->ff_unshaded = p_value;
 		} else if (p_param == StringName("ff_depth_test_disabled")) {
 			m->ff_depth_test_disabled = p_value;
+		} else {
+			// Per-texture-unit params ("ff_tex0".."ff_tex3", etc.) --
+			// parsed by prefix + trailing unit index instead of one
+			// explicit branch per unit per property, since
+			// FF_TEXTURE_UNIT_MAX properties would otherwise mean 4
+			// near-identical branches per property.
+			String param_str = String(p_param);
+			auto parse_unit_suffix = [&](const char *p_prefix) -> int {
+				String prefix(p_prefix);
+				if (!param_str.begins_with(prefix)) {
+					return -1;
+				}
+				String suffix = param_str.substr(prefix.length(), param_str.length() - prefix.length());
+				if (!suffix.is_valid_integer()) {
+					return -1;
+				}
+				int idx = suffix.to_int();
+				if (idx < 0 || idx >= FF_TEXTURE_UNIT_MAX) {
+					return -1;
+				}
+				return idx;
+			};
+			int idx;
+			if ((idx = parse_unit_suffix("ff_tex")) >= 0) {
+				m->ff_tex[idx] = p_value;
+			} else if ((idx = parse_unit_suffix("ff_env_mode")) >= 0) {
+				m->ff_env_mode[idx] = p_value;
+			} else if ((idx = parse_unit_suffix("ff_combine_func")) >= 0) {
+				m->ff_combine_func[idx] = p_value;
+			} else if ((idx = parse_unit_suffix("ff_texgen_mode")) >= 0) {
+				m->ff_texgen_mode[idx] = p_value;
+			}
 		}
 	}
 	virtual Variant material_get_param(RID p_material, const StringName &p_param) const { return Variant(); }

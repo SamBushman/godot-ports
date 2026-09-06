@@ -1,6 +1,7 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
+#include <stdio.h>
 #include <string.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
@@ -99,30 +100,58 @@ static GLenum _ff_combine_func_to_gl(int p_func) {
 	}
 }
 
+// Mirrors FixedFunctionMaterial::TexgenMode numerically. GL_SPHERE_MAP/
+// GL_OBJECT_LINEAR/GL_EYE_LINEAR are all core since GL 1.0 and need no
+// capability gate; GL_REFLECTION_MAP is gated by the caller
+// (has_texgen_reflection_map) since it's GL 1.3/GL_NV_texgen_reflection.
+static GLenum _ff_texgen_mode_to_gl(int p_mode) {
+	switch (p_mode) {
+		case 1: // TEXGEN_SPHERE_MAP
+			return GL_SPHERE_MAP;
+		case 2: // TEXGEN_REFLECTION_MAP
+			return GL_REFLECTION_MAP;
+		case 3: // TEXGEN_OBJECT_LINEAR
+			return GL_OBJECT_LINEAR;
+		case 4: // TEXGEN_EYE_LINEAR
+			return GL_EYE_LINEAR;
+		case 0: // TEXGEN_NONE
+		default:
+			return 0;
+	}
+}
+
 // Sets up one texture unit's full fixed-function state (bind, env mode,
-// and -- when requested and available -- real GL_COMBINE/dot3 combiner
-// state) for godot-ports#35's FixedFunctionMaterial. p_gl_texture_unit is
-// GL_TEXTURE0/GL_TEXTURE1 for glActiveTexture/glClientActiveTexture;
-// p_second_operand_source is GL_PRIMARY_COLOR (unit 0, combining the
-// texture against the surface's own per-vertex color) or GL_PREVIOUS
-// (unit 1+, chaining against the prior stage's result) -- the standard
-// two-stage combiner pattern this authoring surface's first pass targets
-// (godot-ports#25's dot3 bump-mapping technique: a base/diffuse unit
-// feeding a normal-map unit in Combine+Dot3 mode).
-static void _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_texture_unit, GLenum p_second_operand_source, RasterizerStorageGLFF::Texture *p_tex, int p_env_mode, int p_combine_func) {
+// real GL_COMBINE/dot3 combiner state, and texgen) for godot-ports#35's
+// FixedFunctionMaterial. p_gl_texture_unit is GL_TEXTURE0+unit_index for
+// glActiveTexture/glClientActiveTexture; p_second_operand_source is
+// GL_PRIMARY_COLOR (unit 0, combining the texture against the surface's
+// own per-vertex color) or GL_PREVIOUS (unit 1+, chaining against the
+// prior stage's result) -- the standard multi-stage combiner pattern
+// this authoring surface targets (godot-ports#25's dot3 bump-mapping
+// technique: a base/diffuse unit feeding a normal-map unit in
+// Combine+Dot3 mode). Returns true if this unit ends up with real
+// texture-coordinate-array data the caller should still supply (i.e.
+// textured but NOT using texgen, which generates its own coordinates
+// and makes the vertex array's UVs irrelevant for this unit).
+static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_texture_unit, GLenum p_second_operand_source, RasterizerStorageGLFF::Texture *p_tex, int p_env_mode, int p_combine_func, int p_texgen_mode) {
 	if (p_scene->has_multitexture) {
 		glActiveTexture(p_gl_texture_unit);
 		glClientActiveTexture(p_gl_texture_unit);
 	}
 
+	// Always reset texgen first -- a prior surface/unit may have left it
+	// enabled, and this authoring surface has no other reset point since
+	// draw order (and thus which unit last used texgen) isn't fixed.
+	glDisable(GL_TEXTURE_GEN_S);
+	glDisable(GL_TEXTURE_GEN_T);
+
 	if (!p_tex) {
 		glDisable(GL_TEXTURE_2D);
-		return;
+		return false;
 	}
 
 	glEnable(GL_TEXTURE_2D);
 	glBindTexture(GL_TEXTURE_2D, p_tex->tex_id);
-	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 
 	if (p_env_mode == 4 /* ENV_COMBINE */ && p_scene->has_texture_env_combine) {
 		GLenum combine_func = _ff_combine_func_to_gl(p_combine_func);
@@ -138,6 +167,38 @@ static void _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_tex
 	} else {
 		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, _ff_env_mode_to_gl(p_env_mode));
 	}
+
+	GLenum texgen_gl = _ff_texgen_mode_to_gl(p_texgen_mode);
+	if (texgen_gl == GL_REFLECTION_MAP && !p_scene->has_texgen_reflection_map) {
+		texgen_gl = 0; // Degrade to no texgen (plain per-vertex UVs) rather than an unsupported mode.
+	}
+	if (texgen_gl != 0) {
+		glTexGeni(GL_S, GL_TEXTURE_GEN_MODE, texgen_gl);
+		glTexGeni(GL_T, GL_TEXTURE_GEN_MODE, texgen_gl);
+		if (texgen_gl == GL_OBJECT_LINEAR || texgen_gl == GL_EYE_LINEAR) {
+			// Simple planar projection (S along model/eye-space X, T along
+			// Y) -- a fixed default, not a per-property-configurable plane
+			// equation; sufficient to demonstrate/use these two texgen
+			// modes without the larger scope of authoring arbitrary plane
+			// vectors (deferred, see godot-ports#35's write-up).
+			static const GLfloat plane_s[4] = { 1, 0, 0, 0 };
+			static const GLfloat plane_t[4] = { 0, 1, 0, 0 };
+			if (texgen_gl == GL_OBJECT_LINEAR) {
+				glTexGenfv(GL_S, GL_OBJECT_PLANE, plane_s);
+				glTexGenfv(GL_T, GL_OBJECT_PLANE, plane_t);
+			} else {
+				glTexGenfv(GL_S, GL_EYE_PLANE, plane_s);
+				glTexGenfv(GL_T, GL_EYE_PLANE, plane_t);
+			}
+		}
+		glEnable(GL_TEXTURE_GEN_S);
+		glEnable(GL_TEXTURE_GEN_T);
+		glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+		return false;
+	}
+
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	return true;
 }
 
 // Phase 3 (godot-ports#14 proposal): real mesh/material rendering, walking
@@ -442,41 +503,44 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				}
 
 				PoolVector<Vector2>::Read ur;
-				bool used_texture_unit_1 = false;
+				int highest_unit_used = -1;
 				if (mat && mat->ff_active) {
 					// godot-ports#35: FixedFunctionMaterial's real
-					// multi-texture-unit path. Both units (when unit 1 is
-					// actually usable) sample the SAME uv set -- this
-					// first pass targets exactly the classic dot3
-					// bump-mapping layout (base color + normal map at the
-					// same UV coordinates), not independent UV2-style
-					// per-unit coordinates.
+					// multi-texture-unit path. Every unit (when usable --
+					// unit 0 always, units 1+ only when has_multitexture)
+					// samples the SAME uv set -- this authoring surface
+					// targets the classic multi-stage compositing layout
+					// (base color feeding a normal-map/detail unit in
+					// Combine+Dot3 mode, etc.), not independent UV2-style
+					// per-unit coordinates. How many of
+					// RasterizerStorageGLFF::FF_TEXTURE_UNIT_MAX units are
+					// actually iterated is capped by max_texture_units --
+					// real detected hardware capability, regardless of
+					// what the material or its project target-GPU tier
+					// declare (see rasterizer_storage_glff.h's
+					// FF_TEXTURE_UNIT_MAX comment).
 					if (surface->has_uvs) {
 						ur = surface->uvs.read();
 					}
 
-					RasterizerStorageGLFF::Texture *ff_tex0 = mat->ff_tex[0].is_valid() ? storage->texture_owner.getornull(mat->ff_tex[0]) : nullptr;
-					if (ff_tex0) {
-						ff_tex0 = ff_tex0->get_ptr();
-					}
-					_ff_setup_texture_unit(this, GL_TEXTURE0, GL_PRIMARY_COLOR, ff_tex0, mat->ff_env_mode[0], mat->ff_combine_func[0]);
-					if (ff_tex0 && surface->has_uvs) {
-						glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
-					} else {
-						glDisableClientState(GL_TEXTURE_COORD_ARRAY);
-					}
-
-					if (has_multitexture) {
-						RasterizerStorageGLFF::Texture *ff_tex1 = mat->ff_tex[1].is_valid() ? storage->texture_owner.getornull(mat->ff_tex[1]) : nullptr;
-						if (ff_tex1) {
-							ff_tex1 = ff_tex1->get_ptr();
+					int unit_cap = MIN(RasterizerStorageGLFF::FF_TEXTURE_UNIT_MAX, max_texture_units);
+					for (int u = 0; u < unit_cap; u++) {
+						if (u > 0 && !has_multitexture) {
+							break;
 						}
-						_ff_setup_texture_unit(this, GL_TEXTURE1, GL_PREVIOUS, ff_tex1, mat->ff_env_mode[1], mat->ff_combine_func[1]);
-						if (ff_tex1 && surface->has_uvs) {
+						RasterizerStorageGLFF::Texture *ff_tex = mat->ff_tex[u].is_valid() ? storage->texture_owner.getornull(mat->ff_tex[u]) : nullptr;
+						if (ff_tex) {
+							ff_tex = ff_tex->get_ptr();
+						}
+						GLenum second_operand_source = (u == 0) ? GL_PRIMARY_COLOR : GL_PREVIOUS;
+						bool wants_uv_array = _ff_setup_texture_unit(this, GL_TEXTURE0 + u, second_operand_source, ff_tex, mat->ff_env_mode[u], mat->ff_combine_func[u], mat->ff_texgen_mode[u]);
+						if (ff_tex && wants_uv_array && surface->has_uvs) {
 							glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
-							used_texture_unit_1 = true;
-						} else {
+						} else if (ff_tex && wants_uv_array) {
 							glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+						}
+						if (ff_tex) {
+							highest_unit_used = u;
 						}
 					}
 				} else if (surface->has_uvs && tex) {
@@ -505,7 +569,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				// code path (2D canvas rendering, other materials in this
 				// same pass) that assumes GL_TEXTURE0 is always the active
 				// unit and never touches multitexture at all.
-				if (has_multitexture && (used_texture_unit_1 || (mat && mat->ff_active))) {
+				if (has_multitexture && (highest_unit_used > 0 || (mat && mat->ff_active))) {
 					glClientActiveTexture(GL_TEXTURE0);
 					glActiveTexture(GL_TEXTURE0);
 				}
@@ -577,6 +641,29 @@ void RasterizerSceneGLFF::initialize() {
 	has_multitexture = ext && strstr(ext, "GL_ARB_multitexture") != nullptr;
 	has_texture_env_combine = ext && (strstr(ext, "GL_ARB_texture_env_combine") != nullptr || strstr(ext, "GL_EXT_texture_env_combine") != nullptr);
 	has_texture_env_dot3 = ext && (strstr(ext, "GL_ARB_texture_env_dot3") != nullptr || strstr(ext, "GL_EXT_texture_env_dot3") != nullptr);
+
+	max_texture_units = 1;
+	if (has_multitexture) {
+		GLint gl_max_texture_units = 1;
+		glGetIntegerv(GL_MAX_TEXTURE_UNITS, &gl_max_texture_units);
+		max_texture_units = MAX(1, (int)gl_max_texture_units);
+	}
+
+	// GL_REFLECTION_MAP texgen mode is core since GL 1.3, or available via
+	// GL_NV_texgen_reflection on older hardware -- parse the leading
+	// "major.minor" out of GL_VERSION (format is "<major>.<minor> <vendor
+	// string>", e.g. "1.3 ATI-1.4.18") rather than assuming a specific
+	// driver's string layout beyond that leading version token.
+	has_texgen_reflection_map = ext && strstr(ext, "GL_NV_texgen_reflection") != nullptr;
+	if (!has_texgen_reflection_map) {
+		const char *ver = (const char *)glGetString(GL_VERSION);
+		int major = 0, minor = 0;
+		if (ver && sscanf(ver, "%d.%d", &major, &minor) == 2) {
+			if (major > 1 || (major == 1 && minor >= 3)) {
+				has_texgen_reflection_map = true;
+			}
+		}
+	}
 }
 
 RasterizerSceneGLFF::RasterizerSceneGLFF() {

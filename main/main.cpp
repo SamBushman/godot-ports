@@ -1186,6 +1186,23 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 
 	GLOBAL_DEF("rendering/quality/driver/fallback_to_gles2", false);
 
+	// godot-ports#35: a FixedFunctionMaterial's real fixed-function GL
+	// state (multitexture/combine/dot3/texgen) is graded against a
+	// declared target GPU tier, not the editing machine's own live GL
+	// capability -- so an asset authored on this project's dev hardware
+	// (RV250, "full") can still be graded/authored correctly for a
+	// project that ultimately targets weaker real hardware (Rage Pro/
+	// Rage 128), and vice versa. Tiers/hardware mapped from this
+	// project's driver research (godot-ports#25): Rage Pro has no
+	// multitexture at all; Rage 128 has multitexture+combine but no
+	// Dot3; RV250/GeForce2 MX and newer have full combine+Dot3+
+	// reflection-map texgen. render_scene() additionally always caps
+	// against the actually-detected live hardware capability regardless
+	// of this setting, so a mismatched tier can never cause a real
+	// driver error -- it only affects what the Inspector exposes/grays.
+	GLOBAL_DEF("rendering/quality/gl_fixed_function/target_gpu", 2);
+	ProjectSettings::get_singleton()->set_custom_property_info("rendering/quality/gl_fixed_function/target_gpu", PropertyInfo(Variant::INT, "rendering/quality/gl_fixed_function/target_gpu", PROPERTY_HINT_ENUM, "Rage Pro (no multitexture),Rage 128 (multitexture, no Dot3),RV250 / GeForce2 MX and newer (full)"));
+
 	// Assigning here, to be sure that it appears in docs
 	GLOBAL_DEF("rendering/2d/options/use_nvidia_rect_flicker_workaround", false);
 

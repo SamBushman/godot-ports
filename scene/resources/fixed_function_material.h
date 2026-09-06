@@ -17,15 +17,16 @@
 // material_set_param() under well-known names, the same mechanism
 // SpatialMaterial already uses for "albedo"/"texture_albedo" (see #17/#24).
 //
-// First-pass scope (2026-09-05): 2 texture units (this driver's floor
-// design assumes at most optional ARB_multitexture, and every chip this
-// project has researched -- Rage Pro/128, Radeon 7000, GeForce2 MX --
-// supports at least 2 when multitexture is present at all), enough to
-// author #25's dot3 bump-mapping technique with zero GLSL. Deferred to
-// follow-up, per explicit user-agreed scoping: more texture units,
-// texgen (#32), and hardware-capability-driven graying in the Inspector
-// (a project-level "minimum target GPU" setting, not live-querying the
-// editing machine's own GPU -- see godot-ports#35's discussion).
+// Second pass (2026-09-05): 4 texture units (a fixed authoring-surface
+// ceiling comfortably covering this era's real hardware, not a literal
+// live GL_MAX_TEXTURE_UNITS query -- see rasterizer_storage_glff.h's
+// FF_TEXTURE_UNIT_MAX comment for why), texgen (#32's authoring
+// surface), and Inspector-side hardware-capability graying driven by a
+// new project-level "rendering/quality/gl_fixed_function/target_gpu"
+// setting (main.cpp) rather than live-querying the editing machine's
+// own GPU -- see _validate_property() below. First pass (2 units,
+// Combine/Dot3, no texgen/graying) shipped as godot-ports#35's initial
+// commit; this pass completes the issue's original success criteria.
 class FixedFunctionMaterial : public Material {
 	GDCLASS(FixedFunctionMaterial, Material);
 
@@ -45,6 +46,14 @@ public:
 		COMBINE_DOT3,
 	};
 
+	enum TexgenMode {
+		TEXGEN_NONE,
+		TEXGEN_SPHERE_MAP,
+		TEXGEN_REFLECTION_MAP,
+		TEXGEN_OBJECT_LINEAR,
+		TEXGEN_EYE_LINEAR,
+	};
+
 	enum CullMode {
 		CULL_BACK,
 		CULL_FRONT,
@@ -58,12 +67,22 @@ public:
 		BLEND_MUL,
 	};
 
-	static const int TEXTURE_UNIT_MAX = 2;
+	// Target-GPU tiers for rendering/quality/gl_fixed_function/target_gpu
+	// (main.cpp) -- must stay in the same order as that setting's
+	// PROPERTY_HINT_ENUM string.
+	enum TargetGPUTier {
+		TARGET_GPU_RAGE_PRO,
+		TARGET_GPU_RAGE_128,
+		TARGET_GPU_RV250_AND_NEWER,
+	};
+
+	static const int TEXTURE_UNIT_MAX = 4;
 
 private:
 	Ref<Texture> texture_unit_texture[TEXTURE_UNIT_MAX];
 	EnvMode texture_unit_env_mode[TEXTURE_UNIT_MAX];
 	CombineFunc texture_unit_combine_func[TEXTURE_UNIT_MAX];
+	TexgenMode texture_unit_texgen_mode[TEXTURE_UNIT_MAX];
 
 	bool unshaded;
 	bool depth_test_disabled;
@@ -78,8 +97,17 @@ private:
 	// rather than batching updates.
 	void _update_material_param(const StringName &p_param, const Variant &p_value);
 
+	// How many texture units the CURRENT rendering/quality/gl_fixed_function/
+	// target_gpu project setting exposes (1 for Rage Pro, 2 for Rage 128,
+	// TEXTURE_UNIT_MAX for RV250+). Also used by _validate_property().
+	static int _get_target_gpu_tier();
+	static int _get_tier_unit_count(int p_tier);
+	static bool _get_tier_has_dot3(int p_tier);
+	static bool _get_tier_has_reflection_map(int p_tier);
+
 protected:
 	static void _bind_methods();
+	void _validate_property(PropertyInfo &property) const;
 
 public:
 	void set_texture_unit_texture(int p_unit, const Ref<Texture> &p_texture);
@@ -91,24 +119,27 @@ public:
 	void set_texture_unit_combine_func(int p_unit, CombineFunc p_func);
 	CombineFunc get_texture_unit_combine_func(int p_unit) const;
 
-	// Per-slot property forwarding (texture_unit_0_*/texture_unit_1_*) --
-	// ClassDB needs fixed, individually-bound methods (no runtime-sized
-	// property arrays in this Godot version's ADD_PROPERTY convention),
-	// matching the "fixed max count, not a dynamic array" call made for
-	// this first pass.
-	void set_texture_unit_0_texture(const Ref<Texture> &p_texture) { set_texture_unit_texture(0, p_texture); }
-	Ref<Texture> get_texture_unit_0_texture() const { return get_texture_unit_texture(0); }
-	void set_texture_unit_0_env_mode(EnvMode p_mode) { set_texture_unit_env_mode(0, p_mode); }
-	EnvMode get_texture_unit_0_env_mode() const { return get_texture_unit_env_mode(0); }
-	void set_texture_unit_0_combine_func(CombineFunc p_func) { set_texture_unit_combine_func(0, p_func); }
-	CombineFunc get_texture_unit_0_combine_func() const { return get_texture_unit_combine_func(0); }
+	void set_texture_unit_texgen_mode(int p_unit, TexgenMode p_mode);
+	TexgenMode get_texture_unit_texgen_mode(int p_unit) const;
 
-	void set_texture_unit_1_texture(const Ref<Texture> &p_texture) { set_texture_unit_texture(1, p_texture); }
-	Ref<Texture> get_texture_unit_1_texture() const { return get_texture_unit_texture(1); }
-	void set_texture_unit_1_env_mode(EnvMode p_mode) { set_texture_unit_env_mode(1, p_mode); }
-	EnvMode get_texture_unit_1_env_mode() const { return get_texture_unit_env_mode(1); }
-	void set_texture_unit_1_combine_func(CombineFunc p_func) { set_texture_unit_combine_func(1, p_func); }
-	CombineFunc get_texture_unit_1_combine_func() const { return get_texture_unit_combine_func(1); }
+	// Per-slot property forwarding (texture_unit_0_*.. texture_unit_3_*) --
+	// ClassDB needs fixed, individually-bound methods (no runtime-sized
+	// property arrays in this Godot version's ADD_PROPERTY convention).
+#define FF_DECLARE_TEXTURE_UNIT_ACCESSORS(m_unit)                                                                                    \
+	void set_texture_unit_##m_unit##_texture(const Ref<Texture> &p_texture) { set_texture_unit_texture(m_unit, p_texture); }         \
+	Ref<Texture> get_texture_unit_##m_unit##_texture() const { return get_texture_unit_texture(m_unit); }                            \
+	void set_texture_unit_##m_unit##_env_mode(EnvMode p_mode) { set_texture_unit_env_mode(m_unit, p_mode); }                         \
+	EnvMode get_texture_unit_##m_unit##_env_mode() const { return get_texture_unit_env_mode(m_unit); }                               \
+	void set_texture_unit_##m_unit##_combine_func(CombineFunc p_func) { set_texture_unit_combine_func(m_unit, p_func); }             \
+	CombineFunc get_texture_unit_##m_unit##_combine_func() const { return get_texture_unit_combine_func(m_unit); }                   \
+	void set_texture_unit_##m_unit##_texgen_mode(TexgenMode p_mode) { set_texture_unit_texgen_mode(m_unit, p_mode); }                \
+	TexgenMode get_texture_unit_##m_unit##_texgen_mode() const { return get_texture_unit_texgen_mode(m_unit); }
+
+	FF_DECLARE_TEXTURE_UNIT_ACCESSORS(0)
+	FF_DECLARE_TEXTURE_UNIT_ACCESSORS(1)
+	FF_DECLARE_TEXTURE_UNIT_ACCESSORS(2)
+	FF_DECLARE_TEXTURE_UNIT_ACCESSORS(3)
+#undef FF_DECLARE_TEXTURE_UNIT_ACCESSORS
 
 	void set_unshaded(bool p_unshaded);
 	bool get_unshaded() const;
@@ -130,6 +161,7 @@ public:
 
 VARIANT_ENUM_CAST(FixedFunctionMaterial::EnvMode)
 VARIANT_ENUM_CAST(FixedFunctionMaterial::CombineFunc)
+VARIANT_ENUM_CAST(FixedFunctionMaterial::TexgenMode)
 VARIANT_ENUM_CAST(FixedFunctionMaterial::CullMode)
 VARIANT_ENUM_CAST(FixedFunctionMaterial::BlendMode)
 
