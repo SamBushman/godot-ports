@@ -27,6 +27,12 @@
 // own GPU -- see _validate_property() below. First pass (2 units,
 // Combine/Dot3, no texgen/graying) shipped as godot-ports#35's initial
 // commit; this pass completes the issue's original success criteria.
+//
+// dot3_dynamic_light (godot-ports#38): the one addition after #35 closed --
+// #25's Dot3 bump mapping originally dotted against only a static,
+// material-authored dot3_light_direction; this flag opts a material into
+// tracking the scene's real primary DirectionalLight instead, recomputed
+// every frame in rasterizer_scene_glff.cpp's render_scene().
 class FixedFunctionMaterial : public Material {
 	GDCLASS(FixedFunctionMaterial, Material);
 
@@ -97,6 +103,12 @@ private:
 	// _ff_setup_texture_unit() for how this becomes a GL_CONSTANT
 	// texture-environment color.
 	Vector3 dot3_light_direction;
+	// godot-ports#38: when true, dot3_light_direction above is ignored
+	// (except as a no-directional-light fallback) and render_scene()
+	// substitutes the scene's real primary DirectionalLight direction
+	// every frame instead -- the dynamic upgrade to #25's static-only
+	// spike.
+	bool dot3_dynamic_light;
 
 	// Pushes every property's current value to the VisualServer under the
 	// well-known param names RasterizerStorageGLFF::material_set_param()
@@ -164,6 +176,9 @@ public:
 
 	void set_dot3_light_direction(const Vector3 &p_dir);
 	Vector3 get_dot3_light_direction() const;
+
+	void set_dot3_dynamic_light(bool p_enabled);
+	bool get_dot3_dynamic_light() const;
 
 	virtual Shader::Mode get_shader_mode() const { return Shader::MODE_SPATIAL; }
 

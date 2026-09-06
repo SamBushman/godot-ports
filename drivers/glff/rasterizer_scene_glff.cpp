@@ -556,6 +556,18 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 		}
 	}
 
+	// godot-ports#38: dynamic Dot3 light tracking. The scene's first/
+	// primary DirectionalLight's world-space "toward the light" unit
+	// vector (Godot directional lights shine along -Z, so this is +Z of
+	// their transform -- same convention already used for GL_POSITION
+	// below), captured once here and reused per-instance further down
+	// for any FixedFunctionMaterial opting into ff_dot3_dynamic_light.
+	// Deliberately just the first directional light found (matching this
+	// backend's existing single-primary-light treatment elsewhere), not
+	// a full multi-light Dot3 blend -- see #38's own success criteria.
+	bool has_primary_directional_light = false;
+	Vector3 primary_directional_light_dir_world;
+
 	int max_lights = MIN(p_light_cull_count, 8);
 	if (max_lights > 0) {
 		glEnable(GL_LIGHTING);
@@ -592,6 +604,10 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				pos[2] = dir.z;
 				pos[3] = 0.0f;
 				glLightf(gl_light, GL_SPOT_CUTOFF, 180.0f);
+				if (!has_primary_directional_light) {
+					has_primary_directional_light = true;
+					primary_directional_light_dir_world = dir;
+				}
 			} else {
 				Vector3 origin = li->transform.origin;
 				pos[0] = origin.x;
@@ -669,6 +685,19 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					b += instance->lightmap_capture_data[c].b;
 				}
 				instance_ambient = Color(r / 12.0f, g / 12.0f, b / 12.0f, 1.0f);
+			}
+
+			// godot-ports#38: the primary directional light's world-space
+			// direction, re-expressed in THIS instance's own object space
+			// (orthonormalized -- scale doesn't apply to a direction --
+			// then transposed, i.e. inverted, since it's already
+			// orthonormal). Computed once per instance, not per-unit:
+			// every Dot3-combine unit on every surface of this instance
+			// that opts into ff_dot3_dynamic_light shares the same value.
+			Vector3 instance_dot3_dynamic_dir;
+			if (has_primary_directional_light) {
+				Basis inv_rot = instance->transform.basis.orthonormalized().transposed();
+				instance_dot3_dynamic_dir = inv_rot.xform(primary_directional_light_dir_world).normalized();
 			}
 
 			for (int s = 0; s < mesh->surfaces.size(); s++) {
@@ -932,7 +961,16 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 							ff_tex = ff_tex->get_ptr();
 						}
 						GLenum second_operand_source = (u == 0) ? GL_PRIMARY_COLOR : GL_PREVIOUS;
-						bool wants_uv_array = _ff_setup_texture_unit(this, GL_TEXTURE0 + u, second_operand_source, ff_tex, mat->ff_env_mode[u], mat->ff_combine_func[u], mat->ff_texgen_mode[u], mat->ff_dot3_light_direction);
+						// godot-ports#38: a material opting into dynamic
+						// light tracking gets the real primary directional
+						// light's direction (already converted to this
+						// instance's object space above) instead of its
+						// own authored static ff_dot3_light_direction --
+						// falls back to the static value when the scene has
+						// no directional light at all, rather than an
+						// undefined/zero direction.
+						const Vector3 &effective_dot3_dir = (mat->ff_dot3_dynamic_light && has_primary_directional_light) ? instance_dot3_dynamic_dir : mat->ff_dot3_light_direction;
+						bool wants_uv_array = _ff_setup_texture_unit(this, GL_TEXTURE0 + u, second_operand_source, ff_tex, mat->ff_env_mode[u], mat->ff_combine_func[u], mat->ff_texgen_mode[u], effective_dot3_dir);
 						if (ff_tex && wants_uv_array && surface->has_uvs) {
 							glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
 						} else if (ff_tex && wants_uv_array) {

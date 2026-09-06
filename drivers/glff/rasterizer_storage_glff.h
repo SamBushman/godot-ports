@@ -425,6 +425,13 @@ public:
 		// "Option B" scoping and render_scene()'s _ff_setup_texture_unit()
 		// call for how this becomes a GL_CONSTANT texture-env color).
 		Vector3 ff_dot3_light_direction;
+		// godot-ports#38: when true, render_scene() substitutes the
+		// scene's real primary DirectionalLight direction (converted to
+		// this instance's object space, recomputed every frame) for
+		// ff_dot3_light_direction above -- the dynamic upgrade to #25's
+		// static-only spike. Falls back to the static value when the
+		// scene has no directional light.
+		bool ff_dot3_dynamic_light;
 
 		Material() {
 			albedo = Color(1, 1, 1, 1);
@@ -444,6 +451,7 @@ public:
 			ff_unshaded = false;
 			ff_depth_test_disabled = false;
 			ff_dot3_light_direction = Vector3(0, 0, 1);
+			ff_dot3_dynamic_light = false;
 		}
 	};
 	mutable RID_Owner<Material> material_owner;
@@ -492,6 +500,8 @@ public:
 			m->ff_depth_test_disabled = p_value;
 		} else if (p_param == StringName("ff_dot3_light_direction")) {
 			m->ff_dot3_light_direction = p_value;
+		} else if (p_param == StringName("ff_dot3_dynamic_light")) {
+			m->ff_dot3_dynamic_light = p_value;
 		} else {
 			// Per-texture-unit params ("ff_tex0".."ff_tex3", etc.) --
 			// parsed by prefix + trailing unit index instead of one
