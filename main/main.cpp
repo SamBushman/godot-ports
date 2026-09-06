@@ -1018,6 +1018,15 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		FileAccess::make_default<FileAccessNetwork>(FileAccess::ACCESS_RESOURCES);
 	}
 
+	// Set the executable path early (the full cmdline args, not yet fully
+	// built at this point, are set again below once complete) -- some
+	// platforms' OS::get_executable_path() (e.g. OS_OSX's pre-10.5 Tiger
+	// fallback, which has no live-process-query API like proc_pidpath())
+	// can only return the cached value this call populates, and
+	// ProjectSettings::_setup() below needs a real executable path to find
+	// a standalone-export's .pck next to the app bundle (godot-ports#37).
+	OS::get_singleton()->set_cmdline(execpath, main_args);
+
 	if (globals->setup(project_path, main_pack, upwards, editor) == OK) {
 #ifdef TOOLS_ENABLED
 		found_project = true;
