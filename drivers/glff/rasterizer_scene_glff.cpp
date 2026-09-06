@@ -201,6 +201,124 @@ static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_tex
 	return true;
 }
 
+// godot-ports#30: a panorama sky background is ordinary textured geometry
+// (a lat/long "skydome" sphere with equirectangular UVs, matching
+// PanoramaSky's own texture layout: u = longitude/2pi, v = latitude/pi),
+// not a fixed-function capability question at all -- the earlier "dropped,
+// shader-only feature" call confused GLES2's specific *implementation*
+// (a fullscreen shader pass sampling by view-ray direction) with the
+// underlying concept. Generated once (lazily, on first real use) and
+// cached for the process lifetime -- this geometry never changes.
+struct _SkyboxVertex {
+	GLfloat pos[3];
+	GLfloat uv[2];
+};
+static Vector<_SkyboxVertex> *_skybox_verts = nullptr;
+static const int SKYBOX_LAT_SEGMENTS = 16;
+static const int SKYBOX_LON_SEGMENTS = 24;
+
+static Vector<_SkyboxVertex> *_get_skybox_verts() {
+	if (_skybox_verts) {
+		return _skybox_verts;
+	}
+	_skybox_verts = memnew(Vector<_SkyboxVertex>);
+	const float radius = 50.0f;
+	for (int lat = 0; lat < SKYBOX_LAT_SEGMENTS; lat++) {
+		float v0 = (float)lat / SKYBOX_LAT_SEGMENTS;
+		float v1 = (float)(lat + 1) / SKYBOX_LAT_SEGMENTS;
+		float theta0 = v0 * Math_PI;
+		float theta1 = v1 * Math_PI;
+		for (int lon = 0; lon < SKYBOX_LON_SEGMENTS; lon++) {
+			float u0 = (float)lon / SKYBOX_LON_SEGMENTS;
+			float u1 = (float)(lon + 1) / SKYBOX_LON_SEGMENTS;
+			float phi0 = u0 * Math_PI * 2.0f;
+			float phi1 = u1 * Math_PI * 2.0f;
+
+			// Quad corners on the unit sphere (y = up, matching Godot's
+			// convention); position is that unit vector times radius.
+			// Winding is CW-front when viewed from INSIDE the sphere
+			// (this backend's glFrontFace(GL_CW) convention, see
+			// initialize()) -- a skydome is viewed from its interior, the
+			// opposite of ordinary outward-facing scene geometry.
+			auto vertex_at = [&](float theta, float phi, float u, float v) {
+				_SkyboxVertex vx;
+				float sin_theta = Math::sin(theta), cos_theta = Math::cos(theta);
+				float sin_phi = Math::sin(phi), cos_phi = Math::cos(phi);
+				vx.pos[0] = radius * sin_theta * cos_phi;
+				vx.pos[1] = radius * cos_theta;
+				vx.pos[2] = radius * sin_theta * sin_phi;
+				vx.uv[0] = u;
+				vx.uv[1] = v;
+				return vx;
+			};
+
+			_SkyboxVertex v00 = vertex_at(theta0, phi0, u0, v0);
+			_SkyboxVertex v10 = vertex_at(theta0, phi1, u1, v0);
+			_SkyboxVertex v01 = vertex_at(theta1, phi0, u0, v1);
+			_SkyboxVertex v11 = vertex_at(theta1, phi1, u1, v1);
+
+			_skybox_verts->push_back(v00);
+			_skybox_verts->push_back(v01);
+			_skybox_verts->push_back(v10);
+
+			_skybox_verts->push_back(v10);
+			_skybox_verts->push_back(v01);
+			_skybox_verts->push_back(v11);
+		}
+	}
+	return _skybox_verts;
+}
+
+// Draws the skydome centered on the camera's world position (so it always
+// surrounds the viewer regardless of movement) with a FIXED world
+// orientation (no camera-rotation coupling -- a real static environment,
+// not something that spins with the player). Called after the frame's
+// initial clear and before the main opaque pass, with depth test/write
+// both off (it must never occlude or be occluded by real geometry; drawn
+// first, into an otherwise-empty depth buffer, is what makes it always
+// appear "behind" everything else).
+static void _draw_skybox(RasterizerStorageGLFF *p_storage, const Transform &p_cam_transform, RID p_panorama) {
+	RasterizerStorageGLFF::Texture *tex = p_storage->texture_owner.getornull(p_panorama);
+	if (tex) {
+		tex = tex->get_ptr();
+	}
+	if (!tex) {
+		return;
+	}
+
+	Vector<_SkyboxVertex> *verts = _get_skybox_verts();
+
+	glPushMatrix();
+	GLfloat gl_model[16];
+	Transform camera_pos_only;
+	camera_pos_only.origin = p_cam_transform.origin;
+	_load_transform_gl(camera_pos_only, gl_model);
+	glMultMatrixf(gl_model);
+
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_LIGHTING);
+	glDisable(GL_CULL_FACE);
+	glDisable(GL_BLEND);
+	glColor4f(1, 1, 1, 1);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_NORMAL_ARRAY);
+
+	glEnable(GL_TEXTURE_2D);
+	glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glVertexPointer(3, GL_FLOAT, sizeof(_SkyboxVertex), &verts->ptr()[0].pos[0]);
+	glTexCoordPointer(2, GL_FLOAT, sizeof(_SkyboxVertex), &verts->ptr()[0].uv[0]);
+	glDrawArrays(GL_TRIANGLES, 0, verts->size());
+
+	glDepthMask(GL_TRUE);
+	glEnable(GL_DEPTH_TEST);
+	glPopMatrix();
+}
+
 // Phase 3 (godot-ports#14 proposal): real mesh/material rendering, walking
 // p_cull_result instead of Phase 1's hardcoded test triangle. Scope
 // deliberately excludes (see rasterizer_storage_glff.h's Surface/Material
@@ -222,9 +340,8 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// requests a specific solid background (ENV_BG_COLOR/CANVAS/COLOR_SKY).
 	// Every other case (no Environment at all -- true for the editor's own
 	// 3D viewport camera and any scene without a WorldEnvironment node, and
-	// also VS::ENV_BG_CLEAR_COLOR/ENV_BG_SKY, sky being dropped/degraded to
-	// clear-color per this backend's design) must NOT touch the color
-	// buffer: VisualServerViewport::_draw_viewport() (servers/visual/
+	// also VS::ENV_BG_CLEAR_COLOR) must NOT touch the color buffer:
+	// VisualServerViewport::_draw_viewport() (servers/visual/
 	// visual_server_viewport.cpp:99) already called clear_render_target()
 	// with the correct default (the "rendering/environment/default_clear_color"
 	// project setting, a light grey, not black) before this function runs.
@@ -258,6 +375,20 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	_load_transform_gl(view_transform, gl_view);
 	glMatrixMode(GL_MODELVIEW);
 	glLoadMatrixf(gl_view);
+
+	// godot-ports#30: real panorama sky, drawn as an ordinary textured
+	// skydome -- see _draw_skybox()'s own comment for why this isn't a
+	// fixed-function capability question at all. Drawn right after the
+	// view/projection matrices are set (it needs them, like any other
+	// geometry) and before the main opaque pass, with its own internal
+	// depth test/write override so it never occludes or is occluded by
+	// real content regardless of draw order after this point.
+	if (env && env->sky.is_valid() && (env->bg_mode == VS::ENV_BG_SKY || env->bg_mode == VS::ENV_BG_COLOR_SKY)) {
+		RasterizerStorageGLFF::Sky *sky = storage->sky_owner.getornull(env->sky);
+		if (sky && sky->panorama.is_valid()) {
+			_draw_skybox(storage, p_cam_transform, sky->panorama);
+		}
+	}
 
 	int max_lights = MIN(p_light_cull_count, 8);
 	if (max_lights > 0) {

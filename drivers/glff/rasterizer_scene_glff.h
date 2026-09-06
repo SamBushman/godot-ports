@@ -47,6 +47,10 @@ public:
 		Color ambient_color;
 		float ambient_energy;
 		int canvas_max_layer;
+		// godot-ports#30: real panorama-sky RID, drawn as an ordinary
+		// textured skybox (see render_scene()'s _draw_skybox() call) when
+		// bg_mode is ENV_BG_SKY/ENV_BG_COLOR_SKY and this is valid.
+		RID sky;
 
 		Environment() {
 			bg_mode = VS::ENV_BG_CLEAR_COLOR;
@@ -63,7 +67,11 @@ public:
 		ERR_FAIL_COND(!e);
 		e->bg_mode = p_bg;
 	}
-	virtual void environment_set_sky(RID p_env, RID p_sky) {}
+	virtual void environment_set_sky(RID p_env, RID p_sky) {
+		Environment *e = environment_owner.getornull(p_env);
+		ERR_FAIL_COND(!e);
+		e->sky = p_sky;
+	}
 	virtual void environment_set_sky_custom_fov(RID p_env, float p_scale) {}
 	virtual void environment_set_sky_orientation(RID p_env, const Basis &p_orientation) {}
 	virtual void environment_set_bg_color(RID p_env, const Color &p_color) {

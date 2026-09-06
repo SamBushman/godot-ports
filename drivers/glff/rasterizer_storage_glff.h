@@ -184,10 +184,27 @@ public:
 	virtual Size2 texture_size_with_proxy(RID p_texture) const { return Size2(texture_get_width(p_texture), texture_get_height(p_texture)); }
 	virtual void texture_set_force_redraw_if_visible(RID p_texture, bool p_enable) {}
 
-	/* SKY (stub -- procedural/panorama sky is a shader feature, dropped, see proposal §4.4c) */
+	/* SKY -- godot-ports#30: a panorama sky is just an ordinary textured
+	   skybox, not a shader-only feature (the earlier "dropped" call
+	   confused the GLES2 *implementation* -- a fullscreen shader pass
+	   sampling by view-ray direction -- with the *concept*, which needs
+	   no fixed-function capability at all). PanoramaSky::_update_sky()
+	   (scene/resources/sky.cpp) always sends a plain 2D equirectangular
+	   texture RID here regardless of the "cube_map" parameter name (a
+	   legacy name from when cubemap skies also existed) -- real cubemap
+	   skies were never added to this fork's supported feature set, only
+	   PanoramaSky is handled. */
+	struct Sky : public RID_Data {
+		RID panorama;
+	};
+	mutable RID_Owner<Sky> sky_owner;
 
-	virtual RID sky_create() { return RID(); }
-	virtual void sky_set_texture(RID p_sky, RID p_cube_map, int p_radiance_size) {}
+	virtual RID sky_create() { return sky_owner.make_rid(memnew(Sky)); }
+	virtual void sky_set_texture(RID p_sky, RID p_cube_map, int p_radiance_size) {
+		Sky *s = sky_owner.getornull(p_sky);
+		ERR_FAIL_COND(!s);
+		s->panorama = p_cube_map;
+	}
 
 	/* SHADER -- real for Phase 4 (godot-ports#24), but only as a tiny
 	   render_mode-flag parser plus a handful of exact-literal body-marker
