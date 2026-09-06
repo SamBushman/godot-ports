@@ -341,6 +341,7 @@ void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
 	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
 	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;
 	surface->has_uvs = (p_format & VS::ARRAY_FORMAT_TEX_UV) != 0;
+	surface->has_uv2 = (p_format & VS::ARRAY_FORMAT_TEX_UV2) != 0;
 
 	if (!(p_vertex_count > 0 && (p_format & VS::ARRAY_FORMAT_VERTEX))) {
 		return;
@@ -370,6 +371,11 @@ void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
 	if (surface->has_uvs) {
 		surface->uvs.resize(p_vertex_count);
 		uw = surface->uvs.write();
+	}
+	PoolVector<Vector2>::Write u2w;
+	if (surface->has_uv2) {
+		surface->uv2.resize(p_vertex_count);
+		u2w = surface->uv2.write();
 	}
 
 	bool normal_octahedral = (p_format & VS::ARRAY_FLAG_USE_OCTAHEDRAL_COMPRESSION) != 0;
@@ -424,6 +430,17 @@ void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
 			} else {
 				const float *f = (const float *)uptr;
 				uw[i] = Vector2(f[0], f[1]);
+			}
+		}
+
+		if (surface->has_uv2) {
+			const uint8_t *u2ptr = base + offsets[VS::ARRAY_TEX_UV2] + i * strides[VS::ARRAY_TEX_UV2];
+			if (p_format & VS::ARRAY_COMPRESS_TEX_UV2) {
+				const uint16_t *h = (const uint16_t *)u2ptr;
+				u2w[i] = Vector2(Math::half_to_float(h[0]), Math::half_to_float(h[1]));
+			} else {
+				const float *f = (const float *)u2ptr;
+				u2w[i] = Vector2(f[0], f[1]);
 			}
 		}
 	}

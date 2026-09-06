@@ -642,6 +642,101 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					glDrawArrays(gl_primitive, 0, surface->vertex_count);
 				}
 
+				// godot-ports#23: baked lightmap modulation, a second draw
+				// pass over the SAME geometry (not a single-pass multitexture
+				// combine, per godot-ports#16's design -- strict GL 1.2 can't
+				// assume GL_ARB_multitexture, but a second pass works on any
+				// GL 1.0+ implementation). instance->lightmap/lightmap_uv_rect
+				// are set by VisualServerScene::instance_set_use_lightmap()
+				// (core, unrelated to LightmapCapture -- see the Surface
+				// struct's uv2 comment) for a *static* baked-lightmap mesh.
+				// glDepthFunc(GL_EQUAL) + a fresh GL_DST_COLOR/GL_ZERO
+				// multiply blend means this pass only darkens/tints exactly
+				// the fragments the opaque pass just drew, by exactly the
+				// lightmap's own baked color -- gated on pass==0 (opaque
+				// only, never the on-top/gizmo pass) and !surface_unshaded
+				// (matches GLES2's own gating: an unshaded surface ignores
+				// all lighting, lightmap included).
+				if (pass == 0 && !surface_unshaded && surface->has_uv2 && instance->lightmap.is_valid()) {
+					RasterizerStorageGLFF::Texture *lightmap_tex = storage->texture_owner.getornull(instance->lightmap);
+					if (lightmap_tex) {
+						lightmap_tex = lightmap_tex->get_ptr();
+					}
+					if (lightmap_tex) {
+						PoolVector<Vector2>::Read u2r = surface->uv2.read();
+
+						glActiveTexture(GL_TEXTURE0);
+						glClientActiveTexture(GL_TEXTURE0);
+						glEnable(GL_TEXTURE_2D);
+						glBindTexture(GL_TEXTURE_2D, lightmap_tex->tex_id);
+						glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
+						glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+						glTexCoordPointer(2, GL_FLOAT, 0, u2r.ptr());
+
+						// lightmap_uv_rect remaps UV2 for atlas-packed
+						// lightmap textures (a plain scale+offset) -- the
+						// fixed-function texture matrix does this for free,
+						// no need to touch the vertex array itself.
+						glMatrixMode(GL_TEXTURE);
+						glPushMatrix();
+						glLoadIdentity();
+						const Rect2 &uv_rect = instance->lightmap_uv_rect;
+						glTranslatef(uv_rect.position.x, uv_rect.position.y, 0.0f);
+						glScalef(uv_rect.size.x, uv_rect.size.y, 1.0f);
+						glMatrixMode(GL_MODELVIEW);
+
+						glDisableClientState(GL_COLOR_ARRAY);
+						glColor4f(1, 1, 1, 1);
+						glDisable(GL_LIGHTING);
+
+						glDepthFunc(GL_EQUAL);
+						glDepthMask(GL_FALSE);
+						glEnable(GL_BLEND);
+						glBlendEquation(GL_FUNC_ADD);
+						glBlendFunc(GL_DST_COLOR, GL_ZERO);
+
+						if (surface->index_count > 0) {
+							GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+							PoolVector<uint8_t>::Read ir = surface->index_array.read();
+							glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
+						} else {
+							glDrawArrays(gl_primitive, 0, surface->vertex_count);
+						}
+
+						glDepthFunc(GL_LEQUAL);
+						glDepthMask(GL_TRUE);
+						if (!surface_unshaded && max_lights > 0) {
+							glEnable(GL_LIGHTING);
+						}
+						glMatrixMode(GL_TEXTURE);
+						glPopMatrix();
+						glMatrixMode(GL_MODELVIEW);
+
+						// Restore this surface's own blend state -- the
+						// lightmap pass forced GL_DST_COLOR/GL_ZERO above,
+						// unconditionally enabled, regardless of what the
+						// surface's own effective_blend_mode/albedo alpha
+						// established earlier in this same iteration.
+						glBlendEquation(GL_FUNC_ADD);
+						if (effective_blend_mode == RasterizerStorageGLFF::GLFF_BLEND_ADD) {
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+						} else if (effective_blend_mode == RasterizerStorageGLFF::GLFF_BLEND_MUL) {
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_DST_COLOR, GL_ZERO);
+						} else if (effective_blend_mode == RasterizerStorageGLFF::GLFF_BLEND_SUB) {
+							glEnable(GL_BLEND);
+							glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+						} else if (albedo.a < 0.999f) {
+							glEnable(GL_BLEND);
+							glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+						} else {
+							glDisable(GL_BLEND);
+						}
+					}
+				}
+
 				// Leave texture-unit state back at unit 0 for every other
 				// code path (2D canvas rendering, other materials in this
 				// same pass) that assumes GL_TEXTURE0 is always the active

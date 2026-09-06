@@ -522,23 +522,28 @@ public:
 		Vector<AABB> bone_aabbs;
 		RID material;
 
-		// Phase 3: decoded once at mesh_add_surface() time into plain,
-		// uncompressed CPU-side arrays -- fixed-function glVertexPointer/
-		// glNormalPointer/glColorPointer/glTexCoordPointer can't consume
-		// the packed/compressed formats a shader-based glVertexAttribPointer
-		// pipeline can (half-float, octahedral-compressed normals, byte
-		// colors -- see VisualServer::mesh_surface_make_offsets_from_format
-		// for the authoritative wire layout this decode mirrors). Tangent,
-		// UV2 (lightmap), bones, and weights are deliberately not decoded --
-		// no normal-mapping, lightmap-blending, or skinning in this backend
-		// yet (see godot-ports#14 proposal, Phase 3 scope).
+		// Phase 3: decoded once at mesh_add_surface() time (and re-decoded
+		// on mesh_surface_update_region(), see _decode_surface_arrays() and
+		// godot-ports#22's decode-on-update fix) into plain, uncompressed
+		// CPU-side arrays -- fixed-function glVertexPointer/glNormalPointer/
+		// glColorPointer/glTexCoordPointer can't consume the packed/
+		// compressed formats a shader-based glVertexAttribPointer pipeline
+		// can (half-float, octahedral-compressed normals, byte colors --
+		// see VisualServer::mesh_surface_make_offsets_from_format for the
+		// authoritative wire layout this decode mirrors). UV2 is decoded
+		// too, for godot-ports#23's baked-lightmap modulation pass; tangent,
+		// bones, and weights are still deliberately not decoded (no
+		// normal-mapping in this backend, and skinning bypasses this path
+		// entirely via CPU pre-skinning -- see godot-ports#22).
 		PoolVector<Vector3> vertices;
 		PoolVector<Vector3> normals;
 		PoolVector<Color> colors;
 		PoolVector<Vector2> uvs;
+		PoolVector<Vector2> uv2;
 		bool has_normals = false;
 		bool has_colors = false;
 		bool has_uvs = false;
+		bool has_uv2 = false;
 	};
 
 	struct Mesh : public RID_Data {
