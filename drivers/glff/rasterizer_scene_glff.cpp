@@ -389,6 +389,70 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
 				glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
 
+				// godot-ports#24 (Phase 4 remainder): FLAG_DISABLE_AMBIENT_LIGHT.
+				// GL's own lighting equation is
+				// ambient_contrib = GL_LIGHT_MODEL_AMBIENT * GL_AMBIENT(material),
+				// computed independently of GL_DIFFUSE -- overriding just the
+				// material's own GL_AMBIENT to black zeroes the scene-ambient
+				// contribution for this surface while direct-light diffuse/
+				// specular continue normally, a real (not approximated) match
+				// for what this flag means. Not exposed on FixedFunctionMaterial
+				// (godot-ports#35 didn't request it), always explicitly set
+				// either way to avoid leaking a previous surface's state.
+				bool effective_ambient_disabled = (mat && mat->ff_active) ? false : (shader && shader->ambient_light_disabled);
+				if (effective_ambient_disabled) {
+					GLfloat zero_ambient[4] = { 0, 0, 0, 1 };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, zero_ambient);
+				}
+
+				// godot-ports#24: FEATURE_EMISSION -> GL_EMISSION (core GL 1.0,
+				// a genuine direct map, not an approximation). Always set
+				// explicitly (including the disabled/black case) since
+				// GL_EMISSION is sticky material state that would otherwise
+				// leak into a following surface with no emission at all.
+				bool effective_emission_enabled = (mat && mat->ff_active) ? false : (shader && shader->emission_enabled);
+				if (effective_emission_enabled && mat) {
+					GLfloat mat_emission[4] = { mat->emission.r * mat->emission_energy, mat->emission.g * mat->emission_energy, mat->emission.b * mat->emission_energy, 1.0f };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, mat_emission);
+				} else {
+					GLfloat zero_emission[4] = { 0, 0, 0, 1 };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero_emission);
+				}
+
+				// godot-ports#24: SPECULAR_PHONG approximation. Fixed-function
+				// GL_LIGHTING's built-in specular term is itself a Blinn-Phong
+				// model (not true Phong), the natural fixed-function
+				// equivalent -- SpatialMaterial's "specular" (0..1 intensity)
+				// and "roughness" (0..1, inverted here into a GL_SHININESS
+				// exponent) drive it directly. specular_disabled (a
+				// render_mode token alongside specular_schlick_ggx/toon --
+				// none of which have a further fixed-function equivalent
+				// beyond this same Blinn-Phong approximation) zeroes it
+				// instead, a real, not approximated, "no specular" result.
+				bool effective_specular_disabled = (mat && mat->ff_active) ? true : (shader && shader->specular_disabled);
+				if (!effective_specular_disabled && mat) {
+					GLfloat spec = mat->specular;
+					GLfloat mat_specular[4] = { spec, spec, spec, 1.0f };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, mat_specular);
+					GLfloat shininess = CLAMP((1.0f - mat->roughness) * 128.0f, 0.0f, 128.0f);
+					glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, shininess);
+				} else {
+					GLfloat zero_specular[4] = { 0, 0, 0, 1 };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero_specular);
+					glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+				}
+
+				// godot-ports#24: FLAG_USE_ALPHA_SCISSOR -> glAlphaFunc, a real
+				// direct map (core GL 1.0). Always explicitly enabled/disabled
+				// per surface to avoid leaking into unrelated draws.
+				bool effective_use_alpha_scissor = (mat && mat->ff_active) ? false : (shader && shader->use_alpha_scissor);
+				if (effective_use_alpha_scissor && mat) {
+					glEnable(GL_ALPHA_TEST);
+					glAlphaFunc(GL_GREATER, mat->alpha_scissor_threshold);
+				} else {
+					glDisable(GL_ALPHA_TEST);
+				}
+
 				// Per-material blend mode (godot-ports#24/#17): MIX is the
 				// default alpha-blend-if-transparent behavior already in
 				// place; ADD/MUL/SUB are real GL blend-equation/-func direct
@@ -480,21 +544,34 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					glDisableClientState(GL_NORMAL_ARRAY);
 				}
 
-				// Per-vertex color arrays and GL_LIGHTING interact via
-				// GL_COLOR_MATERIAL, which we don't enable here -- a *shaded*
-				// surface with both vertex colors and active lighting draws
-				// using the material's albedo only (documented simplification,
-				// no content in this driver's target scope combines the two).
-				// This must NOT gate on the scene-wide max_lights count, though
-				// -- editor gizmos (axis lines, move/rotate/scale handles) are
-				// real per-vertex-colored (red/green/blue per axis), always-
-				// unshaded geometry (surface_unshaded above), and were going
-				// uncolored in any scene with a real light (e.g. the "Squash
-				// the Creeps" tutorial's DirectionalLight), since max_lights>0
-				// disabled vertex colors globally regardless of whether THIS
-				// surface even has lighting enabled (godot-ports#28).
+				// godot-ports#24: FLAG_ALBEDO_FROM_VERTEX_COLOR. A *shaded*
+				// surface requesting this needs GL_COLOR_MATERIAL enabled so
+				// the bound per-vertex color array actually feeds the
+				// GL_LIGHTING equation's ambient+diffuse material term,
+				// instead of glColor4f()'s single flat "current color" above
+				// -- the real fixed-function equivalent of this flag (a
+				// genuine direct map, not an approximation). Always
+				// explicitly enabled/disabled per surface to avoid leaking
+				// into unrelated draws. Not exposed on FixedFunctionMaterial
+				// (godot-ports#35 didn't request it).
+				bool effective_albedo_from_vertex_color = (mat && mat->ff_active) ? false : (shader && shader->albedo_from_vertex_color);
+				if (effective_albedo_from_vertex_color) {
+					glEnable(GL_COLOR_MATERIAL);
+					glColorMaterial(GL_FRONT_AND_BACK, GL_AMBIENT_AND_DIFFUSE);
+				} else {
+					glDisable(GL_COLOR_MATERIAL);
+				}
+
+				// Per-vertex color arrays: the unshaded/max_lights==0 cases
+				// (editor gizmos -- axis lines, move/rotate/scale handles,
+				// always-unshaded per-vertex-colored geometry, godot-ports#28)
+				// draw via glColor4f()'s "current color" directly, no
+				// GL_COLOR_MATERIAL needed since lighting is off entirely.
+				// effective_albedo_from_vertex_color (just above) is the
+				// separate *shaded*-surface case, needing both the array
+				// AND GL_COLOR_MATERIAL together.
 				PoolVector<Color>::Read cr;
-				if (surface->has_colors && (surface_unshaded || max_lights == 0)) {
+				if (surface->has_colors && (surface_unshaded || max_lights == 0 || effective_albedo_from_vertex_color)) {
 					cr = surface->colors.read();
 					glEnableClientState(GL_COLOR_ARRAY);
 					glColorPointer(4, GL_FLOAT, 0, cr.ptr());

@@ -190,17 +190,25 @@ public:
 	virtual void sky_set_texture(RID p_sky, RID p_cube_map, int p_radiance_size) {}
 
 	/* SHADER -- real for Phase 4 (godot-ports#24), but only as a tiny
-	   render_mode-flag parser, never a real shader compiler. SpatialMaterial
-	   communicates cull_mode/blend_mode/unshaded/etc. exclusively by
-	   generating a real GLSL source string with a leading
-	   "render_mode a,b,c;" line and calling shader_set_code() with it
-	   (scene/resources/material.cpp's Material3D::_update_shader()) --
+	   render_mode-flag parser plus a handful of exact-literal body-marker
+	   checks, never a real shader compiler. SpatialMaterial communicates
+	   cull_mode/blend_mode/unshaded/ambient_light_disabled/specular_mode/
+	   etc. exclusively by generating a real GLSL source string with a
+	   leading "render_mode a,b,c;" line and calling shader_set_code() with
+	   it (scene/resources/material.cpp's Material3D::_update_shader()) --
 	   there is no other path (these are NOT sent via material_set_param()).
-	   GLFF never compiles the shader body at all -- it just scans the
-	   render_mode line's comma-separated keyword list for the handful of
-	   tokens that map onto real fixed-function pipeline state, since that's
-	   the only way this backend can ever learn a material's cull/blend/
-	   unshaded/depth-test intent. */
+	   A few flags (FLAG_ALBEDO_FROM_VERTEX_COLOR, FLAG_USE_ALPHA_SCISSOR,
+	   FEATURE_EMISSION) aren't render_mode tokens at all -- they're baked
+	   directly into the generated fragment body/uniform declarations, so
+	   detecting them means searching the code string for the exact,
+	   deterministic literal substrings this fork's OWN generator emits
+	   ("albedo_tex *= COLOR;" etc, see the Shader struct's own comment)
+	   -- still not a general GLSL parse or shader compiler, and safe for
+	   the same reason the render_mode scan is: this is recognizing fixed,
+	   known output from code we control on both ends, not interpreting
+	   arbitrary developer-authored GLSL (which #35's design explicitly
+	   ruled out for ShaderMaterial, a genuinely different problem). GLFF
+	   never compiles or executes any of this as real GLSL either way. */
 	enum GLFFCullMode {
 		GLFF_CULL_BACK,
 		GLFF_CULL_FRONT,
@@ -218,6 +226,27 @@ public:
 		GLFFBlendMode blend_mode;
 		bool unshaded;
 		bool depth_test_disabled;
+		// godot-ports#24 (Phase 4 remainder): ambient_light_disabled and
+		// specular_disabled are, like unshaded/depth_test_disable above,
+		// plain render_mode tokens (Material3D::_update_shader() emits
+		// ",ambient_light_disabled"/one of ",specular_*"). Reused the
+		// same token-scan mechanism, no new plumbing needed.
+		bool ambient_light_disabled;
+		bool specular_disabled;
+		// albedo_from_vertex_color/use_alpha_scissor are NOT render_mode
+		// tokens -- SpatialMaterial bakes them straight into the
+		// generated fragment shader BODY ("albedo_tex *= COLOR;" /
+		// "ALPHA_SCISSOR=alpha_scissor_threshold;"). This is still safe
+		// to detect via a plain substring search: unlike a hand-authored
+		// ShaderMaterial's arbitrary GLSL (which #35's design explicitly
+		// refuses to parse, no semantic anchor), this is OUR OWN
+		// deterministic first-party generator's fixed, known output on
+		// this exact fork -- there's nothing "arbitrary" being
+		// interpreted, just recognizing two exact literal strings this
+		// codebase's own code generator can produce.
+		bool albedo_from_vertex_color;
+		bool use_alpha_scissor;
+		bool emission_enabled;
 		String code;
 
 		Shader() {
@@ -225,6 +254,11 @@ public:
 			blend_mode = GLFF_BLEND_MIX;
 			unshaded = false;
 			depth_test_disabled = false;
+			ambient_light_disabled = false;
+			specular_disabled = false;
+			albedo_from_vertex_color = false;
+			use_alpha_scissor = false;
+			emission_enabled = false;
 		}
 	};
 	mutable RID_Owner<Shader> shader_owner;
@@ -268,6 +302,15 @@ public:
 
 		s->unshaded = tokens.find("unshaded") != -1;
 		s->depth_test_disabled = tokens.find("depth_test_disable") != -1;
+		s->ambient_light_disabled = tokens.find("ambient_light_disabled") != -1;
+		s->specular_disabled = tokens.find("specular_disabled") != -1;
+
+		// Body-marker detection (see the Shader struct comment above) --
+		// deliberately exact, whole-fragment substrings from this fork's
+		// own Material3D::_update_shader(), not a general GLSL parse.
+		s->albedo_from_vertex_color = p_code.find("albedo_tex *= COLOR;") != -1;
+		s->use_alpha_scissor = p_code.find("ALPHA_SCISSOR=alpha_scissor_threshold;") != -1;
+		s->emission_enabled = p_code.find("uniform vec4 emission : hint_color;") != -1;
 	}
 	virtual String shader_get_code(RID p_shader) const {
 		Shader *s = shader_owner.getornull(p_shader);
@@ -284,13 +327,19 @@ public:
 	virtual bool is_shader_async_hidden_forbidden() { return false; }
 
 	/* MATERIAL -- Phase 4 (godot-ports#24) real for albedo color/texture
-	   (Phase 3) plus cull_mode/blend_mode/unshaded/depth_test_disabled
-	   (parsed off the linked Shader's render_mode line, see above). The
-	   rest of godot-ports#17's mapping table (PBR textures, non-Lambert/
-	   Blinn diffuse/specular modes, ambient_light_disabled, alpha
-	   scissor, point-size billboarding) stays unimplemented -- degrades
-	   to this same flat-albedo/no-special-state behavior, which is the
-	   documented fallback for all of those. */
+	   (Phase 3), cull_mode/blend_mode/unshaded/depth_test_disabled/
+	   ambient_light_disabled/specular_disabled (parsed off the linked
+	   Shader's render_mode line, see above), emission/emission_energy/
+	   specular/roughness/alpha_scissor_threshold (real material_set_param()
+	   values, gated by the Shader's emission_enabled/use_alpha_scissor
+	   body-marker bools), and FLAG_ALBEDO_FROM_VERTEX_COLOR (also a
+	   Shader body-marker bool, applied in render_scene() via
+	   GL_COLOR_MATERIAL). Godot-ports#17's remaining mapping-table rows
+	   (PBR textures beyond flat albedo, non-Lambert diffuse modes,
+	   non-Blinn/Phong specular modes, point-size billboarding, dithering)
+	   are confirmed-drop rows per #17/#24's own scoping, not gaps --
+	   they degrade to this same flat-albedo/no-special-state behavior,
+	   which is the documented fallback for all of those. */
 	// Real fixed-function texture-unit combiner state for a
 	// FixedFunctionMaterial (godot-ports#35) -- driven entirely by
 	// material_set_param()'s "ff_*" well-known names below, since this
@@ -316,6 +365,23 @@ public:
 		RID albedo_texture;
 		RID shader;
 
+		// godot-ports#24 (Phase 4 remainder): real SpatialMaterial params
+		// beyond albedo/albedo_texture, sent via material_set_param()
+		// under the exact string keys Material3D itself uses (confirmed
+		// by reading scene/resources/material.cpp's ShaderNames setup --
+		// "emission"/"emission_energy"/"specular"/"roughness"/
+		// "alpha_scissor_threshold"). Whether each is actually USED for a
+		// given surface is gated by the linked Shader's render_mode-
+		// derived bools below (emission_enabled/specular_disabled/
+		// use_alpha_scissor) -- e.g. emission is always stored but only
+		// applied when FEATURE_EMISSION was on. Defaults mirror
+		// SpatialMaterial's own real defaults.
+		Color emission;
+		float emission_energy;
+		float specular;
+		float roughness;
+		float alpha_scissor_threshold;
+
 		// True only for a FixedFunctionMaterial (set via the "ff_active"
 		// param, always sent once by its constructor) -- when true,
 		// render_scene() drives real per-unit glTexEnvi/GL_COMBINE/
@@ -337,6 +403,11 @@ public:
 
 		Material() {
 			albedo = Color(1, 1, 1, 1);
+			emission = Color(0, 0, 0, 1);
+			emission_energy = 1.0;
+			specular = 0.5;
+			roughness = 1.0;
+			alpha_scissor_threshold = 0.5;
 			ff_active = false;
 			for (int i = 0; i < FF_TEXTURE_UNIT_MAX; i++) {
 				ff_env_mode[i] = 0;
@@ -373,6 +444,16 @@ public:
 			m->albedo = p_value;
 		} else if (p_param == StringName("texture_albedo")) {
 			m->albedo_texture = p_value;
+		} else if (p_param == StringName("emission")) {
+			m->emission = p_value;
+		} else if (p_param == StringName("emission_energy")) {
+			m->emission_energy = p_value;
+		} else if (p_param == StringName("specular")) {
+			m->specular = p_value;
+		} else if (p_param == StringName("roughness")) {
+			m->roughness = p_value;
+		} else if (p_param == StringName("alpha_scissor_threshold")) {
+			m->alpha_scissor_threshold = p_value;
 		} else if (p_param == StringName("ff_active")) {
 			m->ff_active = p_value;
 		} else if (p_param == StringName("ff_cull_mode")) {
