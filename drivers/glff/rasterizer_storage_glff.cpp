@@ -9,6 +9,24 @@ GLuint RasterizerStorageGLFF::system_fbo = 0;
 
 /* TEXTURE */
 
+// godot-ports#40: this driver (ATI/Mesa GL 1.2, no
+// GL_ARB_texture_non_power_of_two) rejects glTexImage2D outright with
+// GL_INVALID_VALUE for non-power-of-two sizes -- confirmed live via
+// glGetError() during development (every non-POT texture upload failed,
+// e.g. a 12x12 editor icon), not a spec assumption. This is the exact same
+// constraint godot-ports#28/#31 already found and fixed for render targets
+// and the glow-capture texture respectively; texture_allocate()/
+// texture_set_data() below generalize that same fix to every ordinary
+// image texture (which is most of them -- UI icons and imported game
+// textures are routinely non-POT).
+static uint32_t _next_pot(uint32_t p_value) {
+	uint32_t p = 1;
+	while (p < p_value) {
+		p <<= 1;
+	}
+	return p;
+}
+
 RID RasterizerStorageGLFF::texture_create() {
 	Texture *texture = memnew(Texture);
 	ERR_FAIL_COND_V(!texture, RID());
@@ -73,12 +91,22 @@ void RasterizerStorageGLFF::texture_allocate(RID p_texture, int p_width, int p_h
 	texture->gl_internal_format_cache = gl_internal_format;
 	texture->gl_type_cache = gl_type;
 
+	// godot-ports#40: allocate the real GL storage at the next POT size
+	// (see this file's _next_pot()/gl_alloc_width comment) -- the logical
+	// width/height above stay the real requested size; texture_set_data()
+	// fills only the top-left sub-rect via glTexSubImage2D, and every
+	// sampling site must scale its UVs by (width/gl_alloc_width,
+	// height/gl_alloc_height), same convention already established for
+	// render targets.
+	texture->gl_alloc_width = _next_pot(p_width);
+	texture->gl_alloc_height = _next_pot(p_height);
+
 	// Allocate storage now with no data -- texture_set_data uploads the
 	// real pixels later. No mipmap auto-generation exists under strict GL
 	// 1.2 (no SGIS_generate_mipmap/glGenerateMipmap assumed, see proposal
 	// §2) -- CPU-side mip generation is deferred to whichever phase needs
 	// filtered minification; base level alone is enough to compile/display.
-	glTexImage2D(GL_TEXTURE_2D, 0, gl_internal_format, p_width, p_height, 0, gl_format, gl_type, nullptr);
+	glTexImage2D(GL_TEXTURE_2D, 0, gl_internal_format, texture->gl_alloc_width, texture->gl_alloc_height, 0, gl_format, gl_type, nullptr);
 
 	GLenum wrap = (p_flags & VS::TEXTURE_FLAG_REPEAT) ? GL_REPEAT : GL_CLAMP_TO_EDGE;
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, wrap);
@@ -101,9 +129,25 @@ void RasterizerStorageGLFF::texture_set_data(RID p_texture, const Ref<Image> &p_
 	glBindTexture(GL_TEXTURE_2D, texture->tex_id);
 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
+	// godot-ports#40: fill the already-POT-allocated storage's top-left
+	// sub-rect via glTexSubImage2D (texture_allocate() already did the
+	// real glTexImage2D at gl_alloc_width/height) -- a fresh glTexImage2D
+	// at the image's own (possibly non-POT) size here would fail outright
+	// on this driver for most real icons/textures. If this image is
+	// somehow larger than what texture_allocate() sized for (a caller
+	// bug, not something this fix should paper over), re-allocate at a
+	// new POT size that actually fits before filling it.
+	uint32_t needed_pot_w = _next_pot(img->get_width());
+	uint32_t needed_pot_h = _next_pot(img->get_height());
+	if (needed_pot_w > texture->gl_alloc_width || needed_pot_h > texture->gl_alloc_height) {
+		texture->gl_alloc_width = MAX(needed_pot_w, texture->gl_alloc_width);
+		texture->gl_alloc_height = MAX(needed_pot_h, texture->gl_alloc_height);
+		glTexImage2D(GL_TEXTURE_2D, p_level, gl_internal_format, texture->gl_alloc_width, texture->gl_alloc_height, 0, gl_format, gl_type, nullptr);
+	}
+
 	PoolVector<uint8_t> data = img->get_data();
 	PoolVector<uint8_t>::Read r = data.read();
-	glTexImage2D(GL_TEXTURE_2D, p_level, gl_internal_format, img->get_width(), img->get_height(), 0, gl_format, gl_type, r.ptr());
+	glTexSubImage2D(GL_TEXTURE_2D, p_level, 0, 0, img->get_width(), img->get_height(), gl_format, gl_type, r.ptr());
 
 	texture->data_size = data.size();
 	// Cache the uploaded image so texture_get_data() (called by e.g.

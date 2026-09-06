@@ -73,6 +73,23 @@ static void _load_transform2d_gl(const Transform2D &p_transform) {
 	glLoadMatrixf(gl);
 }
 
+// godot-ports#40: this driver has no GL_ARB_texture_non_power_of_two, so
+// ANY texture whose logical size isn't already POT is backed by a larger,
+// POT-rounded GL texture with only its top-left width x height sub-rect
+// ever populated (see the gl_alloc_width/height comment on Texture in
+// rasterizer_storage_glff.h) -- every 2D draw call below that samples a
+// texture with author-supplied or hardcoded-0..1 UVs must rescale them by
+// this factor to stay within the populated sub-rect. A no-op (1.0, 1.0)
+// whenever the texture's real size is already POT.
+static void _get_tex_uv_scale(const RasterizerStorageGLFF::Texture *p_tex, float &r_scale_u, float &r_scale_v) {
+	r_scale_u = 1.0f;
+	r_scale_v = 1.0f;
+	if (p_tex && p_tex->gl_alloc_width > 0 && p_tex->gl_alloc_height > 0) {
+		r_scale_u = (float)p_tex->width / (float)p_tex->gl_alloc_width;
+		r_scale_v = (float)p_tex->height / (float)p_tex->gl_alloc_height;
+	}
+}
+
 // godot-ports#27: Light2D as a multiplicative/additive light-shape-texture
 // blend -- draw the light's own texture (a radial gradient for a point
 // light, a cone for a spotlight-style light, whatever the artist assigned)
@@ -134,7 +151,9 @@ static void _draw_canvas_light(RasterizerStorageGLFF *p_storage, RasterizerCanva
 	float hw = tex->width * p_light->scale * 0.5f;
 	float hh = tex->height * p_light->scale * 0.5f;
 	GLfloat verts[8] = { -hw, -hh, hw, -hh, hw, hh, -hw, hh };
-	GLfloat uvs[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+	float scale_u, scale_v;
+	_get_tex_uv_scale(tex, scale_u, scale_v);
+	GLfloat uvs[8] = { 0, 0, scale_u, 0, scale_u, scale_v, 0, scale_v };
 
 	glBindTexture(GL_TEXTURE_2D, tex->tex_id);
 	glEnable(GL_TEXTURE_2D);
@@ -342,17 +361,9 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						v0 /= tex->height;
 						v1 /= tex->height;
 					}
-					if (tex && tex->is_render_target && tex->gl_alloc_width > 0 && tex->gl_alloc_height > 0) {
-						// This driver has no GL_ARB_texture_non_power_of_two,
-						// so render targets whose logical size isn't already
-						// POT are backed by a larger, POT-rounded GL texture
-						// with only the top-left width x height sub-rect
-						// ever populated (see the gl_alloc_width/height
-						// comment on Texture in rasterizer_storage_glff.h,
-						// godot-ports#28) -- rescale the logical 0..1 UV
-						// range down to that populated sub-rect.
-						float scale_u = (float)tex->width / (float)tex->gl_alloc_width;
-						float scale_v = (float)tex->height / (float)tex->gl_alloc_height;
+					{
+						float scale_u, scale_v;
+						_get_tex_uv_scale(tex, scale_u, scale_v);
 						u0 *= scale_u;
 						u1 *= scale_u;
 						v0 *= scale_v;
@@ -434,7 +445,9 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						(GLfloat)(rect.position.x + rect.size.width), (GLfloat)(rect.position.y + rect.size.height),
 						(GLfloat)rect.position.x, (GLfloat)(rect.position.y + rect.size.height)
 					};
-					GLfloat uvs[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+					float scale_u, scale_v;
+					_get_tex_uv_scale(tex, scale_u, scale_v);
+					GLfloat uvs[8] = { 0, 0, scale_u, 0, scale_u, scale_v, 0, scale_v };
 
 					glEnableClientState(GL_VERTEX_ARRAY);
 					glVertexPointer(2, GL_FLOAT, 0, verts);
@@ -464,6 +477,8 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 					Color c = mr->modulate * batch.item->final_modulate;
 					glColor4f(c.r, c.g, c.b, c.a);
 
+					float scale_u, scale_v;
+					_get_tex_uv_scale(tex, scale_u, scale_v);
 					int rect_count = mr->rects.size();
 					for (int r = 0; r < rect_count; r++) {
 						Rect2 rect = mr->rects[r];
@@ -476,6 +491,10 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 							v0 /= tex->height;
 							v1 /= tex->height;
 						}
+						u0 *= scale_u;
+						u1 *= scale_u;
+						v0 *= scale_v;
+						v1 *= scale_v;
 
 						GLfloat verts[8] = {
 							(GLfloat)rect.position.x, (GLfloat)rect.position.y,
@@ -564,6 +583,8 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						glDisable(GL_TEXTURE_2D);
 					}
 
+					float scale_u, scale_v;
+					_get_tex_uv_scale(tex, scale_u, scale_v);
 					int count = prim->points.size();
 					if (count > 0 && count <= 4) {
 						GLfloat verts[8];
@@ -571,8 +592,8 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						for (int p = 0; p < count; p++) {
 							verts[p * 2] = prim->points[p].x;
 							verts[p * 2 + 1] = prim->points[p].y;
-							uvs[p * 2] = (p < prim->uvs.size()) ? prim->uvs[p].x : 0;
-							uvs[p * 2 + 1] = (p < prim->uvs.size()) ? prim->uvs[p].y : 0;
+							uvs[p * 2] = ((p < prim->uvs.size()) ? prim->uvs[p].x : 0) * scale_u;
+							uvs[p * 2 + 1] = ((p < prim->uvs.size()) ? prim->uvs[p].y : 0) * scale_v;
 						}
 
 						Color c = (prim->colors.size() > 0 ? prim->colors[0] : Color(1, 1, 1, 1)) * batch.item->final_modulate;
@@ -623,6 +644,8 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 							glDisable(GL_TEXTURE_2D);
 						}
 
+						float scale_u, scale_v;
+						_get_tex_uv_scale(tex, scale_u, scale_v);
 						Vector<GLfloat> verts, uvs, cols;
 						uvs.resize(vcount * 2);
 						bool has_colors = poly->colors.size() == vcount;
@@ -638,8 +661,8 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 								verts.write[p * 2] = poly->points[p].x;
 								verts.write[p * 2 + 1] = poly->points[p].y;
 							}
-							uvs.write[p * 2] = (p < poly->uvs.size()) ? poly->uvs[p].x : 0;
-							uvs.write[p * 2 + 1] = (p < poly->uvs.size()) ? poly->uvs[p].y : 0;
+							uvs.write[p * 2] = ((p < poly->uvs.size()) ? poly->uvs[p].x : 0) * scale_u;
+							uvs.write[p * 2 + 1] = ((p < poly->uvs.size()) ? poly->uvs[p].y : 0) * scale_v;
 							if (per_vertex_colors) {
 								Color pc = poly->colors[p] * batch.item->final_modulate;
 								cols.write[p * 4] = pc.r;

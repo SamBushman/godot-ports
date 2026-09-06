@@ -63,23 +63,29 @@ public:
 		// rendered SubViewport-as-texture content upside down).
 		bool is_render_target;
 		// Real GL texture storage dimensions when they differ from the
-		// logical width/height above -- only ever set for is_render_target
-		// textures. This driver (ATI/Mesa GL 1.2, no
+		// logical width/height above. This driver (ATI/Mesa GL 1.2, no
 		// GL_ARB_texture_non_power_of_two) rejects glTexImage2D outright
-		// (GL_INVALID_VALUE) for non-power-of-two sizes, which is most
-		// render targets (a 716x822 editor viewport panel, the 1280x980
-		// main window, etc.) -- confirmed via a standalone GL repro,
-		// godot-ports#28. Fix: allocate the real GL texture at the next
-		// POT size (gl_alloc_width/height) and only ever populate its
-		// top-left width x height sub-rect via glCopyTexSubImage2D; the
-		// logical width/height stays the real requested size so the rest
-		// of the engine (UI layout, aspect-ratio math) sees the correct
-		// value. Sampling code must scale UVs by
-		// (width/gl_alloc_width, height/gl_alloc_height) to stay within
-		// the populated sub-rect -- see the is_render_target handling in
-		// rasterizer_canvas_glff.cpp. Zero means "no padding" (ordinary
-		// textures, and any render target whose size already happens to
-		// be POT).
+		// (GL_INVALID_VALUE) for non-power-of-two sizes -- originally found
+		// for render targets (a 716x822 editor viewport panel, the 1280x980
+		// main window, etc.) via a standalone GL repro (godot-ports#28),
+		// then confirmed to apply to ordinary image textures too
+		// (godot-ports#40 -- most small UI icons and imported game textures
+		// are routinely non-POT; every one of them was silently failing to
+		// upload at all, leaving the GL texture object never populated,
+		// which this driver happens to sample back as solid opaque white).
+		// Fix, universal for every Texture now (texture_allocate()/
+		// texture_set_data() in rasterizer_storage_glff.cpp): allocate the
+		// real GL texture at the next POT size (gl_alloc_width/height) and
+		// only ever populate its top-left width x height sub-rect (via
+		// glTexSubImage2D for an ordinary upload, glCopyTexSubImage2D for a
+		// render target); the logical width/height stays the real
+		// requested size so the rest of the engine (UI layout, aspect-
+		// ratio math) sees the correct value. Sampling code must scale UVs
+		// by (width/gl_alloc_width, height/gl_alloc_height) to stay within
+		// the populated sub-rect -- see rasterizer_canvas_glff.cpp's
+		// TYPE_RECT handling and rasterizer_scene_glff.cpp's texture-unit
+		// setup. Zero means "no padding" (any texture whose size already
+		// happens to be POT).
 		uint32_t gl_alloc_width, gl_alloc_height;
 
 		// ViewportTexture (scene/main/viewport.cpp) never samples the
