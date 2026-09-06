@@ -558,6 +558,20 @@ public:
 
 	mutable RID_Owner<Mesh> mesh_owner;
 
+	// godot-ports#22: decodes a Surface's raw surface->array bytes (per
+	// surface->format) into the plain CPU-side vertices/normals/colors/uvs
+	// PoolVectors render_scene() actually reads. Originally only ran once,
+	// inline in mesh_add_surface() -- factored out so
+	// mesh_surface_update_region() (called every frame by the engine's
+	// software_skinning_fallback mechanism, see has_os_feature() below) can
+	// re-run it after patching surface->array, instead of leaving the
+	// decoded arrays permanently frozen at their initial bind-pose values
+	// regardless of any later per-vertex update. Real bug found live: a
+	// software-skinned mesh rendered its correct REST pose but never
+	// visibly deformed for any bone pose, confirmed via a straight-vs-bent
+	// screenshot comparison showing zero difference before this fix.
+	static void _decode_surface_arrays(Surface *surface);
+
 	virtual RID mesh_create();
 	virtual void mesh_add_surface(RID p_mesh, uint32_t p_format, VS::PrimitiveType p_primitive, const PoolVector<uint8_t> &p_array, int p_vertex_count, const PoolVector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<PoolVector<uint8_t>> &p_blend_shapes = Vector<PoolVector<uint8_t>>(), const Vector<AABB> &p_bone_aabbs = Vector<AABB>());
 	virtual void mesh_set_blend_shape_count(RID p_mesh, int p_amount);
@@ -658,9 +672,15 @@ public:
 	virtual RID immediate_get_material(RID p_immediate) const { return RID(); }
 	virtual AABB immediate_get_aabb(RID p_immediate) const { return AABB(); }
 
-	/* SKELETON (stub for Phase 1 -- 3D skinning reuses the engine's
-	   existing software_skinning_fallback per the proposal, not this
-	   backend's own code; wiring that up is Phase 3's job) */
+	/* SKELETON (stub -- this RasterizerStorage-side Skeleton object is
+	   never actually used for 3D skinning at all. godot-ports#22 wires
+	   real CPU skinning up entirely via has_os_feature("skinning_fallback")
+	   below, reusing the engine's existing software_skinning_fallback
+	   mechanism (scene/3d/mesh_instance.cpp) -- MeshInstance detaches its
+	   skeleton from the VisualServer instance once software skinning is
+	   active, so this Skeleton RID exists only to satisfy the interface
+	   for any code path that still queries it, never consulted for real
+	   bone data.) */
 
 	struct Skeleton : public RID_Data {
 		int bone_count;
@@ -1049,7 +1069,27 @@ public:
 	virtual VS::InstanceType get_base_type(RID p_rid) const;
 	virtual bool free(RID p_rid);
 
-	virtual bool has_os_feature(const String &p_feature) const { return false; }
+	// godot-ports#22: this backend has zero GPU skinning capability at
+	// all (no vertex shaders, period -- not a conditionally-constrained
+	// case like GLES2's config.use_skeleton_software, which only needs
+	// this on hardware with too few vertex uniform slots for bone
+	// matrices). Flagging "skinning_fallback" here is the entire fix --
+	// MeshInstance::_is_global_software_skinning_enabled()
+	// (scene/3d/mesh_instance.cpp) checks exactly this via
+	// VSG::storage->has_os_feature("skinning_fallback") and, once true,
+	// its whole SoftwareSkinning mechanism re-skins vertices on the CPU
+	// into a plain, ordinary ArrayMesh (bone/weight arrays stripped, no
+	// skeleton ever attached to the VisualServer instance --
+	// scene/3d/mesh_instance.cpp:358's render_mesh swap) that this
+	// backend's existing mesh_add_surface()/render_scene() path already
+	// renders correctly with zero further GLFF-side code -- confirmed by
+	// reading the mechanism, not guessed.
+	virtual bool has_os_feature(const String &p_feature) const {
+		if (p_feature == "skinning_fallback") {
+			return true;
+		}
+		return false;
+	}
 	virtual void update_dirty_resources() {}
 	virtual void set_debug_generate_wireframes(bool p_generate) {}
 	virtual void render_info_begin_capture() {}

@@ -334,6 +334,101 @@ static void _mesh_surface_make_offsets(uint32_t p_format, int p_vertex_len, uint
 	}
 }
 
+void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
+	uint32_t p_format = surface->format;
+	int p_vertex_count = surface->vertex_count;
+
+	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
+	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;
+	surface->has_uvs = (p_format & VS::ARRAY_FORMAT_TEX_UV) != 0;
+
+	if (!(p_vertex_count > 0 && (p_format & VS::ARRAY_FORMAT_VERTEX))) {
+		return;
+	}
+
+	uint32_t offsets[VS::ARRAY_MAX];
+	uint32_t strides[VS::ARRAY_MAX];
+	_mesh_surface_make_offsets(p_format, p_vertex_count, offsets, strides);
+
+	PoolVector<uint8_t>::Read r = surface->array.read();
+	const uint8_t *base = r.ptr();
+
+	surface->vertices.resize(p_vertex_count);
+	PoolVector<Vector3>::Write vw = surface->vertices.write();
+
+	PoolVector<Vector3>::Write nw;
+	if (surface->has_normals) {
+		surface->normals.resize(p_vertex_count);
+		nw = surface->normals.write();
+	}
+	PoolVector<Color>::Write cw;
+	if (surface->has_colors) {
+		surface->colors.resize(p_vertex_count);
+		cw = surface->colors.write();
+	}
+	PoolVector<Vector2>::Write uw;
+	if (surface->has_uvs) {
+		surface->uvs.resize(p_vertex_count);
+		uw = surface->uvs.write();
+	}
+
+	bool normal_octahedral = (p_format & VS::ARRAY_FLAG_USE_OCTAHEDRAL_COMPRESSION) != 0;
+	bool normal_packed_byte = normal_octahedral && (p_format & VS::ARRAY_COMPRESS_NORMAL) && (p_format & VS::ARRAY_FORMAT_TANGENT) && (p_format & VS::ARRAY_COMPRESS_TANGENT);
+
+	for (int i = 0; i < p_vertex_count; i++) {
+		const uint8_t *vptr = base + offsets[VS::ARRAY_VERTEX] + i * strides[VS::ARRAY_VERTEX];
+		if (p_format & VS::ARRAY_COMPRESS_VERTEX) {
+			const uint16_t *h = (const uint16_t *)vptr;
+			vw[i] = Vector3(Math::half_to_float(h[0]), Math::half_to_float(h[1]), Math::half_to_float(h[2]));
+		} else {
+			const float *f = (const float *)vptr;
+			vw[i] = Vector3(f[0], f[1], f[2]);
+		}
+
+		if (surface->has_normals) {
+			const uint8_t *nptr = base + offsets[VS::ARRAY_NORMAL] + i * strides[VS::ARRAY_NORMAL];
+			if (normal_octahedral) {
+				Vector2 oct;
+				if (normal_packed_byte) {
+					const int8_t *b = (const int8_t *)nptr;
+					oct = Vector2(b[0] / 127.0f, b[1] / 127.0f);
+				} else {
+					const int16_t *s = (const int16_t *)nptr;
+					oct = Vector2(s[0] / 32767.0f, s[1] / 32767.0f);
+				}
+				nw[i] = VisualServer::oct_to_norm(oct);
+			} else if (p_format & VS::ARRAY_COMPRESS_NORMAL) {
+				const int8_t *b = (const int8_t *)nptr;
+				nw[i] = Vector3(b[0] / 127.0f, b[1] / 127.0f, b[2] / 127.0f);
+			} else {
+				const float *f = (const float *)nptr;
+				nw[i] = Vector3(f[0], f[1], f[2]);
+			}
+		}
+
+		if (surface->has_colors) {
+			const uint8_t *cptr = base + offsets[VS::ARRAY_COLOR] + i * strides[VS::ARRAY_COLOR];
+			if (p_format & VS::ARRAY_COMPRESS_COLOR) {
+				cw[i] = Color(cptr[0] / 255.0f, cptr[1] / 255.0f, cptr[2] / 255.0f, cptr[3] / 255.0f);
+			} else {
+				const float *f = (const float *)cptr;
+				cw[i] = Color(f[0], f[1], f[2], f[3]);
+			}
+		}
+
+		if (surface->has_uvs) {
+			const uint8_t *uptr = base + offsets[VS::ARRAY_TEX_UV] + i * strides[VS::ARRAY_TEX_UV];
+			if (p_format & VS::ARRAY_COMPRESS_TEX_UV) {
+				const uint16_t *h = (const uint16_t *)uptr;
+				uw[i] = Vector2(Math::half_to_float(h[0]), Math::half_to_float(h[1]));
+			} else {
+				const float *f = (const float *)uptr;
+				uw[i] = Vector2(f[0], f[1]);
+			}
+		}
+	}
+}
+
 void RasterizerStorageGLFF::mesh_add_surface(RID p_mesh, uint32_t p_format, VS::PrimitiveType p_primitive, const PoolVector<uint8_t> &p_array, int p_vertex_count, const PoolVector<uint8_t> &p_index_array, int p_index_count, const AABB &p_aabb, const Vector<PoolVector<uint8_t>> &p_blend_shapes, const Vector<AABB> &p_bone_aabbs) {
 	Mesh *mesh = mesh_owner.getornull(p_mesh);
 	ERR_FAIL_COND(!mesh);
@@ -349,93 +444,7 @@ void RasterizerStorageGLFF::mesh_add_surface(RID p_mesh, uint32_t p_format, VS::
 	surface->blend_shapes = p_blend_shapes;
 	surface->bone_aabbs = p_bone_aabbs;
 
-	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
-	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;
-	surface->has_uvs = (p_format & VS::ARRAY_FORMAT_TEX_UV) != 0;
-
-	if (p_vertex_count > 0 && (p_format & VS::ARRAY_FORMAT_VERTEX)) {
-		uint32_t offsets[VS::ARRAY_MAX];
-		uint32_t strides[VS::ARRAY_MAX];
-		_mesh_surface_make_offsets(p_format, p_vertex_count, offsets, strides);
-
-		PoolVector<uint8_t>::Read r = p_array.read();
-		const uint8_t *base = r.ptr();
-
-		surface->vertices.resize(p_vertex_count);
-		PoolVector<Vector3>::Write vw = surface->vertices.write();
-
-		PoolVector<Vector3>::Write nw;
-		if (surface->has_normals) {
-			surface->normals.resize(p_vertex_count);
-			nw = surface->normals.write();
-		}
-		PoolVector<Color>::Write cw;
-		if (surface->has_colors) {
-			surface->colors.resize(p_vertex_count);
-			cw = surface->colors.write();
-		}
-		PoolVector<Vector2>::Write uw;
-		if (surface->has_uvs) {
-			surface->uvs.resize(p_vertex_count);
-			uw = surface->uvs.write();
-		}
-
-		bool normal_octahedral = (p_format & VS::ARRAY_FLAG_USE_OCTAHEDRAL_COMPRESSION) != 0;
-		bool normal_packed_byte = normal_octahedral && (p_format & VS::ARRAY_COMPRESS_NORMAL) && (p_format & VS::ARRAY_FORMAT_TANGENT) && (p_format & VS::ARRAY_COMPRESS_TANGENT);
-
-		for (int i = 0; i < p_vertex_count; i++) {
-			const uint8_t *vptr = base + offsets[VS::ARRAY_VERTEX] + i * strides[VS::ARRAY_VERTEX];
-			if (p_format & VS::ARRAY_COMPRESS_VERTEX) {
-				const uint16_t *h = (const uint16_t *)vptr;
-				vw[i] = Vector3(Math::half_to_float(h[0]), Math::half_to_float(h[1]), Math::half_to_float(h[2]));
-			} else {
-				const float *f = (const float *)vptr;
-				vw[i] = Vector3(f[0], f[1], f[2]);
-			}
-
-			if (surface->has_normals) {
-				const uint8_t *nptr = base + offsets[VS::ARRAY_NORMAL] + i * strides[VS::ARRAY_NORMAL];
-				if (normal_octahedral) {
-					Vector2 oct;
-					if (normal_packed_byte) {
-						const int8_t *b = (const int8_t *)nptr;
-						oct = Vector2(b[0] / 127.0f, b[1] / 127.0f);
-					} else {
-						const int16_t *s = (const int16_t *)nptr;
-						oct = Vector2(s[0] / 32767.0f, s[1] / 32767.0f);
-					}
-					nw[i] = VisualServer::oct_to_norm(oct);
-				} else if (p_format & VS::ARRAY_COMPRESS_NORMAL) {
-					const int8_t *b = (const int8_t *)nptr;
-					nw[i] = Vector3(b[0] / 127.0f, b[1] / 127.0f, b[2] / 127.0f);
-				} else {
-					const float *f = (const float *)nptr;
-					nw[i] = Vector3(f[0], f[1], f[2]);
-				}
-			}
-
-			if (surface->has_colors) {
-				const uint8_t *cptr = base + offsets[VS::ARRAY_COLOR] + i * strides[VS::ARRAY_COLOR];
-				if (p_format & VS::ARRAY_COMPRESS_COLOR) {
-					cw[i] = Color(cptr[0] / 255.0f, cptr[1] / 255.0f, cptr[2] / 255.0f, cptr[3] / 255.0f);
-				} else {
-					const float *f = (const float *)cptr;
-					cw[i] = Color(f[0], f[1], f[2], f[3]);
-				}
-			}
-
-			if (surface->has_uvs) {
-				const uint8_t *uptr = base + offsets[VS::ARRAY_TEX_UV] + i * strides[VS::ARRAY_TEX_UV];
-				if (p_format & VS::ARRAY_COMPRESS_TEX_UV) {
-					const uint16_t *h = (const uint16_t *)uptr;
-					uw[i] = Vector2(Math::half_to_float(h[0]), Math::half_to_float(h[1]));
-				} else {
-					const float *f = (const float *)uptr;
-					uw[i] = Vector2(f[0], f[1]);
-				}
-			}
-		}
-	}
+	_decode_surface_arrays(surface);
 
 	mesh->surfaces.push_back(surface);
 }
@@ -481,10 +490,20 @@ void RasterizerStorageGLFF::mesh_surface_update_region(RID p_mesh, int p_surface
 	ERR_FAIL_COND(!mesh);
 	ERR_FAIL_INDEX(p_surface, mesh->surfaces.size());
 	Surface *s = mesh->surfaces[p_surface];
-	PoolVector<uint8_t>::Write w = s->array.write();
-	PoolVector<uint8_t>::Read r = p_data.read();
-	ERR_FAIL_COND(p_offset + p_data.size() > s->array.size());
-	memcpy(w.ptr() + p_offset, r.ptr(), p_data.size());
+	{
+		PoolVector<uint8_t>::Write w = s->array.write();
+		PoolVector<uint8_t>::Read r = p_data.read();
+		ERR_FAIL_COND(p_offset + p_data.size() > s->array.size());
+		memcpy(w.ptr() + p_offset, r.ptr(), p_data.size());
+	}
+	// godot-ports#22: re-derive the plain CPU-side vertices/normals/colors/
+	// uvs render_scene() reads, since this call (used every frame by the
+	// engine's software_skinning_fallback mechanism) only ever patched the
+	// raw surface->array bytes above -- without this, a software-skinned
+	// mesh would render its correct initial bind pose but never visibly
+	// deform for any later bone pose, a real bug found live (confirmed via
+	// a straight-vs-bent screenshot comparison showing zero difference).
+	_decode_surface_arrays(s);
 }
 
 void RasterizerStorageGLFF::mesh_surface_set_material(RID p_mesh, int p_surface, RID p_material) {
