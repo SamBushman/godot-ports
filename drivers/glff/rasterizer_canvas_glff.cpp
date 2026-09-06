@@ -73,10 +73,99 @@ static void _load_transform2d_gl(const Transform2D &p_transform) {
 	glLoadMatrixf(gl);
 }
 
+// godot-ports#27: Light2D as a multiplicative/additive light-shape-texture
+// blend -- draw the light's own texture (a radial gradient for a point
+// light, a cone for a spotlight-style light, whatever the artist assigned)
+// as an ordinary textured quad positioned/rotated by the light's real
+// transform, blended over the already-drawn opaque 2D scene according to
+// its VS::CanvasLightMode. This is a second, separate pass over p_light's
+// linked list -- not a real per-pixel lighting model (no per-fragment math
+// exists in fixed-function), but a close visual approximation for this
+// backend's common use cases (torches, glows, flashlights) per the issue's
+// own hypothesis.
+//
+// Deliberately NOT implemented in this first pass (see godot-ports#27's
+// success criteria, which explicitly defers this): LightOccluder2D shadow
+// casting, CANVAS_LIGHT_MODE_MASK (needs a real stencil/alpha-mask
+// multiply pass, a bigger step up than ADD/SUB/MIX), and Light::
+// texture_offset (assumes the light texture is centered on the light's
+// origin, true for every standard Godot light-shape texture but not a
+// sub-rect atlas case).
+static void _draw_canvas_light(RasterizerStorageGLFF *p_storage, RasterizerCanvas::Light *p_light) {
+	if (!p_light->enabled || !p_light->texture.is_valid()) {
+		return;
+	}
+	RasterizerStorageGLFF::Texture *tex = p_storage->texture_owner.getornull(p_light->texture);
+	if (tex) {
+		tex = tex->get_ptr();
+	}
+	if (!tex) {
+		return;
+	}
+
+	switch (p_light->mode) {
+		case VS::CANVAS_LIGHT_MODE_ADD:
+			glBlendEquation(GL_FUNC_ADD);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			break;
+		case VS::CANVAS_LIGHT_MODE_SUB:
+			glBlendEquation(GL_FUNC_REVERSE_SUBTRACT);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE);
+			break;
+		case VS::CANVAS_LIGHT_MODE_MIX:
+		default:
+			// CANVAS_LIGHT_MODE_MASK falls through to this -- an alpha mix
+			// is a closer approximation than a plain additive blend (see
+			// this function's own comment on why a real mask pass isn't
+			// implemented yet).
+			glBlendEquation(GL_FUNC_ADD);
+			glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			break;
+	}
+
+	_load_transform2d_gl(p_light->xform_curr);
+
+	Color c = p_light->color;
+	c.r *= p_light->energy;
+	c.g *= p_light->energy;
+	c.b *= p_light->energy;
+	glColor4f(c.r, c.g, c.b, c.a);
+
+	float hw = tex->width * p_light->scale * 0.5f;
+	float hh = tex->height * p_light->scale * 0.5f;
+	GLfloat verts[8] = { -hw, -hh, hw, -hh, hw, hh, -hw, hh };
+	GLfloat uvs[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+
+	glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+	glEnable(GL_TEXTURE_2D);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glVertexPointer(2, GL_FLOAT, 0, verts);
+	glTexCoordPointer(2, GL_FLOAT, 0, uvs);
+	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+}
+
+static void _draw_canvas_lights(RasterizerStorageGLFF *p_storage, RasterizerCanvas::Light *p_light) {
+	if (!p_light) {
+		return;
+	}
+	glMatrixMode(GL_MODELVIEW);
+	while (p_light) {
+		_draw_canvas_light(p_storage, p_light);
+		p_light = p_light->next_ptr;
+	}
+	// Restore the state every regular CanvasItem draw call in this file
+	// assumes: alpha-blend (not the ADD/SUB this loop may have left
+	// active) and identity modelview (a light's own xform_curr, just
+	// loaded above, must not leak into whatever draws next).
+	glBlendEquation(GL_FUNC_ADD);
+	glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glLoadIdentity();
+}
+
 void RasterizerCanvasGLFF::canvas_render_items_implementation(Item *p_item_list, int p_z, const Color &p_modulate, Light *p_light, const Transform2D &p_base_transform) {
-	// Light2D has no fixed-function equivalent (proposal §5/§5.2, found
-	// during godot-ports#17) -- every CanvasItem draws unshaded regardless
-	// of p_light, by design, not omission.
 	Item *current_clip = nullptr;
 	bool reclip = false;
 
@@ -106,6 +195,77 @@ void RasterizerCanvasGLFF::canvas_render_items_implementation(Item *p_item_list,
 	}
 
 	glDisable(GL_SCISSOR_TEST);
+
+	// godot-ports#27: real Light2D rendering, a second pass over this same
+	// item list's light set -- see _draw_canvas_lights()'s own comment for
+	// the technique and this pass's known limitations.
+	_draw_canvas_lights(storage, p_light);
+}
+
+// godot-ports#33: real CPU skinning for a bone-weighted Polygon2D, the 2D
+// equivalent of godot-ports#22's 3D software-skinning fallback -- no
+// existing engine mechanism to reuse here (unlike #22's MeshInstance/
+// software_skinning_fallback), so this is new CPU vertex-transform code.
+// Matches drivers/gles2/shaders/canvas.glsl's USE_SKELETON block exactly
+// (same skeleton_transform/skeleton_transform_inverse sandwich, same
+// linear weighted-blend-of-raw-matrix-components technique -- NOT a
+// proper decomposed/slerped blend, just like the shader it mirrors), just
+// computed on the CPU instead of a vertex shader: a bone's stored
+// Transform2D (pushed by Skeleton2D/Bone2D via skeleton_bone_set_
+// transform_2d) already maps a rest-pose point *in skeleton space* to its
+// deformed position, also in skeleton space -- so a vertex must be
+// converted world-space -> skeleton-space, deformed there, then converted
+// back, rather than deformed directly in the item's own local space.
+// Returns false (nothing written to r_verts, caller should fall back to
+// the plain undeformed path) when the polygon has no real bone/weight
+// data or its skeleton is missing/not a 2D skeleton.
+static bool _skin_polygon_vertices(RasterizerStorageGLFF *p_storage, const RasterizerCanvas::Item::CommandPolygon *p_poly, const Transform2D &p_local_to_world, const Transform2D &p_item_group_base_transform, RID p_skeleton, Vector<GLfloat> &r_verts) {
+	if (!p_skeleton.is_valid()) {
+		return false;
+	}
+	RasterizerStorageGLFF::Skeleton *skel = p_storage->skeleton_owner.getornull(p_skeleton);
+	if (!skel || !skel->use_2d || skel->bone_count == 0) {
+		return false;
+	}
+
+	int vcount = p_poly->points.size();
+	if (vcount == 0 || p_poly->bones.size() < vcount * 4 || p_poly->weights.size() < vcount * 4) {
+		return false;
+	}
+
+	Transform2D skeleton_transform = p_item_group_base_transform * skel->base_transform_2d;
+	Transform2D skeleton_transform_inv = skeleton_transform.affine_inverse();
+
+	r_verts.resize(vcount * 2);
+	for (int p = 0; p < vcount; p++) {
+		Vector2 world_rest = p_local_to_world.xform(p_poly->points[p]);
+		Vector2 skel_local = skeleton_transform_inv.xform(world_rest);
+
+		Transform2D blended;
+		blended.elements[0] = Vector2();
+		blended.elements[1] = Vector2();
+		blended.elements[2] = Vector2();
+		for (int i = 0; i < 4; i++) {
+			float w = p_poly->weights[p * 4 + i];
+			if (w == 0.0f) {
+				continue;
+			}
+			int b = p_poly->bones[p * 4 + i];
+			if (b < 0 || b >= skel->bone_count) {
+				continue;
+			}
+			const Transform2D &bt = skel->bones_2d[b];
+			blended.elements[0] += bt.elements[0] * w;
+			blended.elements[1] += bt.elements[1] * w;
+			blended.elements[2] += bt.elements[2] * w;
+		}
+
+		Vector2 skel_deformed = blended.xform(skel_local);
+		Vector2 world_deformed = skeleton_transform.xform(skel_deformed);
+		r_verts.write[p * 2] = world_deformed.x;
+		r_verts.write[p * 2 + 1] = world_deformed.y;
+	}
+	return true;
 }
 
 void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, RasterizerStorageGLFF::Material *p_material) {
@@ -430,34 +590,54 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 				case Item::Command::TYPE_POLYGON: {
 					Item::CommandPolygon *poly = static_cast<Item::CommandPolygon *>(command);
 
-					_load_transform2d_gl(batch.item->final_transform * extra_matrix);
-
-					RasterizerStorageGLFF::Texture *tex = poly->texture.is_valid() ? storage->texture_owner.getornull(poly->texture) : nullptr;
-					if (tex) {
-						tex = tex->get_ptr(); // resolve proxies, see TYPE_RECT above
-					}
-					if (tex) {
-						glEnable(GL_TEXTURE_2D);
-						glBindTexture(GL_TEXTURE_2D, tex->tex_id);
-						glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
-					} else {
-						glDisable(GL_TEXTURE_2D);
-					}
-
 					int vcount = poly->points.size();
 					int icount = poly->indices.size();
 					if (vcount > 0) {
+						// godot-ports#33: a bone-weighted Polygon2D deforms
+						// entirely on the CPU, in world/canvas space --
+						// _skin_polygon_vertices() already applies
+						// final_transform (and the skeleton sandwich) to
+						// every point, so this path loads an identity
+						// modelview instead of the usual per-item
+						// transform. Every other command in this switch
+						// still calls _load_transform2d_gl() itself before
+						// drawing, so no explicit restore is needed after.
+						Vector<GLfloat> skinned_verts;
+						bool skinned = _skin_polygon_vertices(storage, poly, batch.item->final_transform * extra_matrix, _render_item_state.item_group_base_transform, batch.item->skeleton, skinned_verts);
+						if (skinned) {
+							glMatrixMode(GL_MODELVIEW);
+							glLoadIdentity();
+						} else {
+							_load_transform2d_gl(batch.item->final_transform * extra_matrix);
+						}
+
+						RasterizerStorageGLFF::Texture *tex = poly->texture.is_valid() ? storage->texture_owner.getornull(poly->texture) : nullptr;
+						if (tex) {
+							tex = tex->get_ptr(); // resolve proxies, see TYPE_RECT above
+						}
+						if (tex) {
+							glEnable(GL_TEXTURE_2D);
+							glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+							glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+						} else {
+							glDisable(GL_TEXTURE_2D);
+						}
+
 						Vector<GLfloat> verts, uvs, cols;
-						verts.resize(vcount * 2);
 						uvs.resize(vcount * 2);
 						bool has_colors = poly->colors.size() == vcount;
 						bool per_vertex_colors = has_colors && poly->colors.size() > 1;
 						if (per_vertex_colors) {
 							cols.resize(vcount * 4);
 						}
+						if (!skinned) {
+							verts.resize(vcount * 2);
+						}
 						for (int p = 0; p < vcount; p++) {
-							verts.write[p * 2] = poly->points[p].x;
-							verts.write[p * 2 + 1] = poly->points[p].y;
+							if (!skinned) {
+								verts.write[p * 2] = poly->points[p].x;
+								verts.write[p * 2 + 1] = poly->points[p].y;
+							}
 							uvs.write[p * 2] = (p < poly->uvs.size()) ? poly->uvs[p].x : 0;
 							uvs.write[p * 2 + 1] = (p < poly->uvs.size()) ? poly->uvs[p].y : 0;
 							if (per_vertex_colors) {
@@ -470,7 +650,7 @@ void RasterizerCanvasGLFF::render_batches(Item *p_current_clip, bool &r_reclip, 
 						}
 
 						glEnableClientState(GL_VERTEX_ARRAY);
-						glVertexPointer(2, GL_FLOAT, 0, verts.ptr());
+						glVertexPointer(2, GL_FLOAT, 0, skinned ? skinned_verts.ptr() : verts.ptr());
 						glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 						glTexCoordPointer(2, GL_FLOAT, 0, uvs.ptr());
 

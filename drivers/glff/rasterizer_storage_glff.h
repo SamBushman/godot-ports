@@ -418,6 +418,14 @@ public:
 		bool ff_unshaded;
 		bool ff_depth_test_disabled;
 
+		// godot-ports#25: the one baked/static light direction a
+		// COMBINE_DOT3 unit dots its normal-map texel against, in the
+		// mesh's own object space (an authoring-time constant, not a real
+		// Light node's runtime-changeable direction -- see the issue's
+		// "Option B" scoping and render_scene()'s _ff_setup_texture_unit()
+		// call for how this becomes a GL_CONSTANT texture-env color).
+		Vector3 ff_dot3_light_direction;
+
 		Material() {
 			albedo = Color(1, 1, 1, 1);
 			emission = Color(0, 0, 0, 1);
@@ -435,6 +443,7 @@ public:
 			ff_blend_mode = GLFF_BLEND_MIX;
 			ff_unshaded = false;
 			ff_depth_test_disabled = false;
+			ff_dot3_light_direction = Vector3(0, 0, 1);
 		}
 	};
 	mutable RID_Owner<Material> material_owner;
@@ -481,6 +490,8 @@ public:
 			m->ff_unshaded = p_value;
 		} else if (p_param == StringName("ff_depth_test_disabled")) {
 			m->ff_depth_test_disabled = p_value;
+		} else if (p_param == StringName("ff_dot3_light_direction")) {
+			m->ff_dot3_light_direction = p_value;
 		} else {
 			// Per-texture-unit params ("ff_tex0".."ff_tex3", etc.) --
 			// parsed by prefix + trailing unit index instead of one
@@ -694,19 +705,26 @@ public:
 	virtual RID immediate_get_material(RID p_immediate) const { return RID(); }
 	virtual AABB immediate_get_aabb(RID p_immediate) const { return AABB(); }
 
-	/* SKELETON (stub -- this RasterizerStorage-side Skeleton object is
-	   never actually used for 3D skinning at all. godot-ports#22 wires
-	   real CPU skinning up entirely via has_os_feature("skinning_fallback")
+	/* SKELETON. The 3D bone slots (bones/skeleton_bone_set_transform) are
+	   a stub never actually consulted for 3D skinning -- godot-ports#22
+	   wires that up entirely via has_os_feature("skinning_fallback")
 	   below, reusing the engine's existing software_skinning_fallback
-	   mechanism (scene/3d/mesh_instance.cpp) -- MeshInstance detaches its
-	   skeleton from the VisualServer instance once software skinning is
-	   active, so this Skeleton RID exists only to satisfy the interface
-	   for any code path that still queries it, never consulted for real
-	   bone data.) */
+	   mechanism (scene/3d/mesh_instance.cpp), which detaches its skeleton
+	   from the VisualServer instance once active. The 2D bone slots
+	   (bones_2d/skeleton_bone_set_transform_2d) are real (godot-ports#33)
+	   -- RasterizerCanvasGLFF's TYPE_POLYGON path (rasterizer_canvas_glff.cpp)
+	   reads them directly to CPU-skin a bone-weighted Polygon2D, the 2D
+	   equivalent of #22's software_skinning_fallback technique (no GPU
+	   capability difference between 2D/3D skinning once it's done on the
+	   CPU before submission -- see #33's own research). */
 
 	struct Skeleton : public RID_Data {
 		int bone_count;
 		Vector<Transform> bones;
+		Vector<Transform2D> bones_2d;
+		Transform2D base_transform_2d;
+		bool use_2d;
+		uint32_t revision;
 	};
 	mutable RID_Owner<Skeleton> skeleton_owner;
 
@@ -716,6 +734,9 @@ public:
 		ERR_FAIL_COND(!s);
 		s->bone_count = p_bones;
 		s->bones.resize(p_bones);
+		s->bones_2d.resize(p_bones);
+		s->use_2d = p_2d_skeleton;
+		s->revision = 0;
 	}
 	virtual int skeleton_get_bone_count(RID p_skeleton) const {
 		Skeleton *s = skeleton_owner.getornull(p_skeleton);
@@ -734,11 +755,37 @@ public:
 		ERR_FAIL_INDEX_V(p_bone, s->bones.size(), Transform());
 		return s->bones[p_bone];
 	}
-	virtual void skeleton_bone_set_transform_2d(RID p_skeleton, int p_bone, const Transform2D &p_transform) {}
-	virtual Transform2D skeleton_bone_get_transform_2d(RID p_skeleton, int p_bone) const { return Transform2D(); }
-	virtual void skeleton_set_base_transform_2d(RID p_skeleton, const Transform2D &p_base_transform) {}
-	virtual uint32_t skeleton_get_revision(RID p_skeleton) const { return 0; }
-	virtual void skeleton_attach_canvas_item(RID p_skeleton, RID p_canvas_item, bool p_attach) {}
+	virtual void skeleton_bone_set_transform_2d(RID p_skeleton, int p_bone, const Transform2D &p_transform) {
+		Skeleton *s = skeleton_owner.getornull(p_skeleton);
+		ERR_FAIL_COND(!s);
+		ERR_FAIL_INDEX(p_bone, s->bones_2d.size());
+		s->bones_2d.write[p_bone] = p_transform;
+		s->revision++;
+	}
+	virtual Transform2D skeleton_bone_get_transform_2d(RID p_skeleton, int p_bone) const {
+		Skeleton *s = skeleton_owner.getornull(p_skeleton);
+		ERR_FAIL_COND_V(!s, Transform2D());
+		ERR_FAIL_INDEX_V(p_bone, s->bones_2d.size(), Transform2D());
+		return s->bones_2d[p_bone];
+	}
+	virtual void skeleton_set_base_transform_2d(RID p_skeleton, const Transform2D &p_base_transform) {
+		Skeleton *s = skeleton_owner.getornull(p_skeleton);
+		ERR_FAIL_COND(!s);
+		s->base_transform_2d = p_base_transform;
+	}
+	virtual uint32_t skeleton_get_revision(RID p_skeleton) const {
+		Skeleton *s = skeleton_owner.getornull(p_skeleton);
+		ERR_FAIL_COND_V(!s, 0);
+		return s->revision;
+	}
+	virtual void skeleton_attach_canvas_item(RID p_skeleton, RID p_canvas_item, bool p_attach) {
+		// No-op: unlike GLES2/3 (which use this to invalidate a cached
+		// per-item bounding rect only when ITS OWN attached skeleton
+		// changes), GLFF's CPU-skinning path (godot-ports#33) always reads
+		// live bone transforms straight from this Skeleton at draw time,
+		// every frame, regardless of any dirty/attachment tracking -- so
+		// there's nothing to invalidate here.
+	}
 
 	/* LIGHT -- minimal real storage for Phase 1/3: enough state that a
 	   later phase can map it onto glLight()/glMaterial(); no shadow
@@ -906,28 +953,121 @@ public:
 	virtual RID gi_probe_dynamic_data_create(int p_width, int p_height, int p_depth, GIProbeCompression p_compression) { return RID(); }
 	virtual void gi_probe_dynamic_data_update(RID p_gi_probe_data, int p_depth_slice, int p_slice_count, int p_mipmap, const void *p_data) {}
 
-	/* LIGHTMAP CAPTURE (stub -- dynamic-object indirect lighting has no
-	   FF equivalent, dropped per proposal §5/§8.1; static surface
-	   lightmapping, which IS kept, is a RasterizerScene concern, not
-	   this) */
+	/* LIGHTMAP CAPTURE. Real storage now (godot-ports#34) -- dynamic-object
+	   indirect lighting itself (per-pixel SH-style reconstruction) still
+	   has no FF equivalent, but the underlying data is just 12 real
+	   captured colors the engine already bakes for us (see
+	   servers/visual/visual_server_scene.cpp's
+	   _update_instance_lightmap_captures / _light_capture_voxel_cone_trace,
+	   both real, backend-independent engine code that CALLS these storage
+	   accessors directly -- lightmap_capture_get_octree_ptr() returning
+	   nullptr here, as it did before #34, is a real null-deref waiting to
+	   happen the moment any BakedLightmapData/GeometryInstance pairing
+	   occurs, not merely an inert stub). RasterizerSceneGLFF's render_scene()
+	   is what actually turns the resulting 12-color instance-side average
+	   into a real GL_LIGHT_MODEL_AMBIENT override -- this struct only
+	   needs to store what real engine code reads back through the
+	   accessors below, static surface lightmapping (kept, a RasterizerScene
+	   concern, not this) aside. */
 
-	struct LightmapCapture : public RID_Data {};
+	struct LightmapCapture : public RID_Data {
+		AABB bounds;
+		PoolVector<uint8_t> octree_data;
+		PoolVector<LightmapCaptureOctree> octree_typed;
+		Transform cell_space_transform;
+		int cell_subdiv;
+		float energy;
+		bool interior;
+
+		LightmapCapture() {
+			cell_subdiv = 1;
+			energy = 1.0;
+			interior = false;
+		}
+	};
 	mutable RID_Owner<LightmapCapture> lightmap_capture_data_owner;
 
 	virtual RID lightmap_capture_create() { return lightmap_capture_data_owner.make_rid(memnew(LightmapCapture)); }
-	virtual void lightmap_capture_set_bounds(RID p_capture, const AABB &p_bounds) {}
-	virtual AABB lightmap_capture_get_bounds(RID p_capture) const { return AABB(); }
-	virtual void lightmap_capture_set_octree(RID p_capture, const PoolVector<uint8_t> &p_octree) {}
-	virtual PoolVector<uint8_t> lightmap_capture_get_octree(RID p_capture) const { return PoolVector<uint8_t>(); }
-	virtual void lightmap_capture_set_octree_cell_transform(RID p_capture, const Transform &p_xform) {}
-	virtual Transform lightmap_capture_get_octree_cell_transform(RID p_capture) const { return Transform(); }
-	virtual void lightmap_capture_set_octree_cell_subdiv(RID p_capture, int p_subdiv) {}
-	virtual int lightmap_capture_get_octree_cell_subdiv(RID p_capture) const { return 0; }
-	virtual void lightmap_capture_set_energy(RID p_capture, float p_energy) {}
-	virtual float lightmap_capture_get_energy(RID p_capture) const { return 0; }
-	virtual void lightmap_capture_set_interior(RID p_capture, bool p_interior) {}
-	virtual bool lightmap_capture_is_interior(RID p_capture) const { return false; }
-	virtual const PoolVector<LightmapCaptureOctree> *lightmap_capture_get_octree_ptr(RID p_capture) const { return nullptr; }
+	virtual void lightmap_capture_set_bounds(RID p_capture, const AABB &p_bounds) {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND(!lc);
+		lc->bounds = p_bounds;
+	}
+	virtual AABB lightmap_capture_get_bounds(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, AABB());
+		return lc->bounds;
+	}
+	virtual void lightmap_capture_set_octree(RID p_capture, const PoolVector<uint8_t> &p_octree) {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND(!lc);
+		lc->octree_data = p_octree;
+		// Real engine code (_update_instance_lightmap_captures) reads
+		// lightmap_capture_get_octree_ptr() as a typed
+		// PoolVector<LightmapCaptureOctree>*, not the raw bytes -- convert
+		// once here (not per-frame) via a plain memcpy reinterpretation,
+		// exactly how BakedLightmapData's own save/load round-trip already
+		// treats this same buffer (a flat array of the POD
+		// LightmapCaptureOctree struct, no versioning/endian-swizzle layer
+		// of its own).
+		int count = p_octree.size() / sizeof(LightmapCaptureOctree);
+		lc->octree_typed.resize(count);
+		if (count > 0) {
+			PoolVector<uint8_t>::Read r = p_octree.read();
+			PoolVector<LightmapCaptureOctree>::Write w = lc->octree_typed.write();
+			memcpy(w.ptr(), r.ptr(), count * sizeof(LightmapCaptureOctree));
+		}
+	}
+	virtual PoolVector<uint8_t> lightmap_capture_get_octree(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, PoolVector<uint8_t>());
+		return lc->octree_data;
+	}
+	virtual void lightmap_capture_set_octree_cell_transform(RID p_capture, const Transform &p_xform) {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND(!lc);
+		lc->cell_space_transform = p_xform;
+	}
+	virtual Transform lightmap_capture_get_octree_cell_transform(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, Transform());
+		return lc->cell_space_transform;
+	}
+	virtual void lightmap_capture_set_octree_cell_subdiv(RID p_capture, int p_subdiv) {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND(!lc);
+		lc->cell_subdiv = p_subdiv;
+	}
+	virtual int lightmap_capture_get_octree_cell_subdiv(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, 0);
+		return lc->cell_subdiv;
+	}
+	virtual void lightmap_capture_set_energy(RID p_capture, float p_energy) {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND(!lc);
+		lc->energy = p_energy;
+	}
+	virtual float lightmap_capture_get_energy(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, 0);
+		return lc->energy;
+	}
+	virtual void lightmap_capture_set_interior(RID p_capture, bool p_interior) {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND(!lc);
+		lc->interior = p_interior;
+	}
+	virtual bool lightmap_capture_is_interior(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, false);
+		return lc->interior;
+	}
+	virtual const PoolVector<LightmapCaptureOctree> *lightmap_capture_get_octree_ptr(RID p_capture) const {
+		LightmapCapture *lc = lightmap_capture_data_owner.getornull(p_capture);
+		ERR_FAIL_COND_V(!lc, nullptr);
+		return &lc->octree_typed;
+	}
 
 	/* PARTICLES (stub -- GPUParticles has no fixed-function path; this is
 	   a content-authoring constraint (use CPUParticles instead), not

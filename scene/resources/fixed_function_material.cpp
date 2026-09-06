@@ -99,6 +99,16 @@ FixedFunctionMaterial::BlendMode FixedFunctionMaterial::get_blend_mode() const {
 	return blend_mode;
 }
 
+void FixedFunctionMaterial::set_dot3_light_direction(const Vector3 &p_dir) {
+	dot3_light_direction = p_dir;
+	_update_material_param("ff_dot3_light_direction", p_dir);
+	_change_notify();
+}
+
+Vector3 FixedFunctionMaterial::get_dot3_light_direction() const {
+	return dot3_light_direction;
+}
+
 // X-macro-style repetition for the 4 near-identical texture unit
 // property blocks -- both here and in the header's accessor
 // declarations, since ClassDB::bind_method needs a distinct method
@@ -134,12 +144,17 @@ void FixedFunctionMaterial::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_cull_mode"), &FixedFunctionMaterial::get_cull_mode);
 	ClassDB::bind_method(D_METHOD("set_blend_mode", "mode"), &FixedFunctionMaterial::set_blend_mode);
 	ClassDB::bind_method(D_METHOD("get_blend_mode"), &FixedFunctionMaterial::get_blend_mode);
+	ClassDB::bind_method(D_METHOD("set_dot3_light_direction", "direction"), &FixedFunctionMaterial::set_dot3_light_direction);
+	ClassDB::bind_method(D_METHOD("get_dot3_light_direction"), &FixedFunctionMaterial::get_dot3_light_direction);
 
 	ADD_GROUP("Render State", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "unshaded"), "set_unshaded", "get_unshaded");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "depth_test_disabled"), "set_depth_test_disabled", "get_depth_test_disabled");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "cull_mode", PROPERTY_HINT_ENUM, "Back,Front,Disabled"), "set_cull_mode", "get_cull_mode");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "blend_mode", PROPERTY_HINT_ENUM, "Mix,Add,Sub,Mul"), "set_blend_mode", "get_blend_mode");
+
+	ADD_GROUP("Dot3 Bump", "");
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "dot3_light_direction"), "set_dot3_light_direction", "get_dot3_light_direction");
 
 	BIND_ENUM_CONSTANT(ENV_MODULATE);
 	BIND_ENUM_CONSTANT(ENV_REPLACE);
@@ -242,6 +257,7 @@ FixedFunctionMaterial::FixedFunctionMaterial() {
 	depth_test_disabled = false;
 	cull_mode = CULL_BACK;
 	blend_mode = BLEND_MIX;
+	dot3_light_direction = Vector3(0, 0, 1);
 
 	for (int i = 0; i < TEXTURE_UNIT_MAX; i++) {
 		texture_unit_env_mode[i] = ENV_MODULATE;
@@ -263,6 +279,7 @@ FixedFunctionMaterial::FixedFunctionMaterial() {
 	_update_material_param("ff_depth_test_disabled", false);
 	_update_material_param("ff_cull_mode", (int)CULL_BACK);
 	_update_material_param("ff_blend_mode", (int)BLEND_MIX);
+	_update_material_param("ff_dot3_light_direction", dot3_light_direction);
 	// Marker param GLFF's material_set_param() uses to flag this material
 	// as fixed-function-driven (not SpatialMaterial-style albedo/albedo_texture)
 	// -- see the RasterizerStorageGLFF::Material comment (godot-ports#35).

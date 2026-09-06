@@ -89,6 +89,15 @@ private:
 	CullMode cull_mode;
 	BlendMode blend_mode;
 
+	// godot-ports#25: the one baked/static light direction a
+	// COMBINE_DOT3-mode texture unit dots its normal-map texel against,
+	// authored in the mesh's own object space. Material-level (not
+	// per-unit) since a single spike/authoring surface only needs one
+	// bump unit at a time -- see rasterizer_scene_glff.cpp's
+	// _ff_setup_texture_unit() for how this becomes a GL_CONSTANT
+	// texture-environment color.
+	Vector3 dot3_light_direction;
+
 	// Pushes every property's current value to the VisualServer under the
 	// well-known param names RasterizerStorageGLFF::material_set_param()
 	// recognizes (see rasterizer_storage_glff.h). Called once from the
@@ -152,6 +161,9 @@ public:
 
 	void set_blend_mode(BlendMode p_mode);
 	BlendMode get_blend_mode() const;
+
+	void set_dot3_light_direction(const Vector3 &p_dir);
+	Vector3 get_dot3_light_direction() const;
 
 	virtual Shader::Mode get_shader_mode() const { return Shader::MODE_SPATIAL; }
 

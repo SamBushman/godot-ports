@@ -32,6 +32,13 @@ class RasterizerSceneGLFF;
 // draws with plain texture-modulate, per the proposal's material-mapping
 // scope (godot-ports#17 covers 3D SpatialMaterial; an equivalent 2D pass
 // hasn't been scoped yet).
+//
+// godot-ports#27: Light2D IS now real (a second light-shape-texture-blend
+// pass, see _draw_canvas_lights() in the .cpp) -- ADD/SUB/MIX modes only,
+// no LightOccluder2D shadow casting, no CANVAS_LIGHT_MODE_MASK (falls
+// back to MIX). Every CanvasItem itself still draws unshaded (no
+// per-pixel lighting term baked into its own draw call); the light pass
+// is purely an after-the-fact blend over the whole already-drawn scene.
 class RasterizerCanvasGLFF : public RasterizerCanvas, public RasterizerCanvasBatcher<RasterizerCanvasGLFF, RasterizerStorageGLFF> {
 public:
 	RasterizerStorageGLFF *storage;

@@ -51,12 +51,23 @@ public:
 		// textured skybox (see render_scene()'s _draw_skybox() call) when
 		// bg_mode is ENV_BG_SKY/ENV_BG_COLOR_SKY and this is valid.
 		RID sky;
+		// godot-ports#31: real glow/bloom (see render_scene()'s
+		// _draw_glow() call) via the classic fixed-function-era
+		// "downsample capture + bilinear-upsample additive blend"
+		// technique -- only enable/intensity are read, the rest of
+		// environment_set_glow()'s many HDR/quality params have no
+		// fixed-function equivalent and are ignored (this backend has no
+		// HDR pipeline at all).
+		bool glow_enabled;
+		float glow_intensity;
 
 		Environment() {
 			bg_mode = VS::ENV_BG_CLEAR_COLOR;
 			bg_energy = 1.0;
 			ambient_energy = 1.0;
 			canvas_max_layer = 0;
+			glow_enabled = false;
+			glow_intensity = 1.0;
 		}
 	};
 	mutable RID_Owner<Environment> environment_owner;
@@ -98,7 +109,12 @@ public:
 	virtual void environment_set_camera_feed_id(RID p_env, int p_camera_feed_id) {}
 	virtual void environment_set_dof_blur_near(RID p_env, bool p_enable, float p_distance, float p_transition, float p_far_amount, VS::EnvironmentDOFBlurQuality p_quality) {}
 	virtual void environment_set_dof_blur_far(RID p_env, bool p_enable, float p_distance, float p_transition, float p_far_amount, VS::EnvironmentDOFBlurQuality p_quality) {}
-	virtual void environment_set_glow(RID p_env, bool p_enable, int p_level_flags, float p_intensity, float p_strength, float p_bloom_threshold, VS::EnvironmentGlowBlendMode p_blend_mode, float p_hdr_bleed_threshold, float p_hdr_bleed_scale, float p_hdr_luminance_cap, bool p_bicubic_upscale, bool p_high_quality) {}
+	virtual void environment_set_glow(RID p_env, bool p_enable, int p_level_flags, float p_intensity, float p_strength, float p_bloom_threshold, VS::EnvironmentGlowBlendMode p_blend_mode, float p_hdr_bleed_threshold, float p_hdr_bleed_scale, float p_hdr_luminance_cap, bool p_bicubic_upscale, bool p_high_quality) {
+		Environment *e = environment_owner.getornull(p_env);
+		ERR_FAIL_COND(!e);
+		e->glow_enabled = p_enable;
+		e->glow_intensity = p_intensity;
+	}
 	virtual void environment_set_fog(RID p_env, bool p_enable, float p_begin, float p_end, RID p_gradient_texture) {}
 	virtual void environment_set_ssr(RID p_env, bool p_enable, int p_max_steps, float p_fade_int, float p_fade_out, float p_depth_tolerance, bool p_roughness) {}
 	virtual void environment_set_ssao(RID p_env, bool p_enable, float p_radius, float p_intensity, float p_radius2, float p_intensity2, float p_bias, float p_light_affect, float p_ao_channel_affect, const Color &p_color, VS::EnvironmentSSAOQuality p_quality, VS::EnvironmentSSAOBlur p_blur, float p_bilateral_sharpness) {}
@@ -204,6 +220,46 @@ public:
 	// research). GL_SPHERE_MAP/GL_OBJECT_LINEAR/GL_EYE_LINEAR texgen are
 	// all core since GL 1.0 and need no capability gate.
 	bool has_texgen_reflection_map;
+
+	// godot-ports#31: GL_SGIS_generate_mipmap (promoted to core
+	// GL_GENERATE_MIPMAP in GL 1.4, same token value 0x8191) -- confirmed
+	// present in our G4/RV250 GL_EXTENSIONS capture. Used by _draw_glow()
+	// to get a real blurred-and-downsampled capture of the just-rendered
+	// frame "for free" from the driver's own mip-chain generation,
+	// instead of a real multi-pass blur kernel.
+	bool has_generate_mipmap;
+	// Lazily allocated on first real glow use; a persistent GL texture
+	// name recaptured every frame via glCopyTexImage2D, not per-mesh
+	// storage (this is a whole-framebuffer post-process, not scene
+	// content), so it doesn't belong in RasterizerStorageGLFF's
+	// Texture/RID_Owner bookkeeping. Plain "unsigned long", not GLuint --
+	// this header (unlike rasterizer_storage_glff.h) never pulls in the
+	// real GL headers, and this Tiger SDK's GLuint is a typedef for
+	// exactly this (confirmed via a real build error: "invalid conversion
+	// from 'unsigned int*' to 'GLuint* {aka long unsigned int*}'" when
+	// this field was plain "unsigned int" instead).
+	unsigned long glow_capture_tex;
+	// The glow_capture_tex's real allocated size -- ROUNDED UP TO A POWER
+	// OF TWO. This driver (G4/RV250, a 2002-era chip) rejects a direct
+	// glCopyTexImage2D at the viewport's actual (non-POT) size with
+	// GL_INVALID_VALUE -- confirmed live via glGetError() during
+	// development, not a spec assumption. The fix is the classic one:
+	// allocate the texture once at POT size via glTexImage2D, then update
+	// just the used (bottom-left) sub-rectangle every frame via
+	// glCopyTexSubImage2D (which has no such POT requirement), sampling
+	// only that sub-rectangle's UV range thereafter. Re-allocated whenever
+	// the real viewport size changes (e.g. window resize).
+	int glow_capture_pot_w;
+	int glow_capture_pot_h;
+
+	// godot-ports#31: whole-framebuffer glow/bloom via the classic
+	// fixed-function-era "downsample capture + forced-small-mip + additive
+	// upsample" technique -- see the .cpp definition for the full
+	// walkthrough. Called from render_scene() right before its final
+	// client-state cleanup, so it captures the fully-composited opaque+
+	// blended scene (but not the 2D canvas pass, which runs after
+	// render_scene() returns).
+	void _draw_glow(float p_intensity);
 
 	void initialize();
 

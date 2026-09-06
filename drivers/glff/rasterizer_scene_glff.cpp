@@ -129,11 +129,14 @@ static GLenum _ff_texgen_mode_to_gl(int p_mode) {
 // prior stage's result) -- the standard multi-stage combiner pattern
 // this authoring surface targets (godot-ports#25's dot3 bump-mapping
 // technique: a base/diffuse unit feeding a normal-map unit in
-// Combine+Dot3 mode). Returns true if this unit ends up with real
-// texture-coordinate-array data the caller should still supply (i.e.
-// textured but NOT using texgen, which generates its own coordinates
-// and makes the vertex array's UVs irrelevant for this unit).
-static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_texture_unit, GLenum p_second_operand_source, RasterizerStorageGLFF::Texture *p_tex, int p_env_mode, int p_combine_func, int p_texgen_mode) {
+// Combine+Dot3 mode). p_second_operand_source is IGNORED for a real
+// Combine+Dot3 unit -- see the GL_DOT3_RGB branch below, which always
+// dots the texture against p_dot3_light_direction (this material's one
+// baked/static light direction) instead. Returns true if this unit ends
+// up with real texture-coordinate-array data the caller should still
+// supply (i.e. textured but NOT using texgen, which generates its own
+// coordinates and makes the vertex array's UVs irrelevant for this unit).
+static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_texture_unit, GLenum p_second_operand_source, RasterizerStorageGLFF::Texture *p_tex, int p_env_mode, int p_combine_func, int p_texgen_mode, const Vector3 &p_dot3_light_direction) {
 	if (p_scene->has_multitexture) {
 		glActiveTexture(p_gl_texture_unit);
 		glClientActiveTexture(p_gl_texture_unit);
@@ -162,7 +165,27 @@ static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_tex
 		glTexEnvi(GL_TEXTURE_ENV, GL_COMBINE_RGB, combine_func);
 		glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE0_RGB, GL_TEXTURE);
 		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND0_RGB, GL_SRC_COLOR);
-		glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, p_second_operand_source);
+		if (combine_func == GL_DOT3_RGB) {
+			// godot-ports#25: a Dot3 unit's second operand is the ONE baked
+			// light direction (this material's ff_dot3_light_direction,
+			// object-space), not the vertex-color/previous-stage chain
+			// p_second_operand_source represents for every other combine
+			// func -- GL_CONSTANT + GL_TEXTURE_ENV_COLOR is the only way to
+			// feed a fixed-function combiner stage an authored constant.
+			// Encoded the same way any Dot3 bump-mapping texture is: a unit
+			// vector's [-1,1] components packed into a color's [0,1] range.
+			Vector3 dir = p_dot3_light_direction.normalized();
+			GLfloat light_color[4] = {
+				dir.x * 0.5f + 0.5f,
+				dir.y * 0.5f + 0.5f,
+				dir.z * 0.5f + 0.5f,
+				1.0f
+			};
+			glTexEnvfv(GL_TEXTURE_ENV, GL_TEXTURE_ENV_COLOR, light_color);
+			glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, GL_CONSTANT);
+		} else {
+			glTexEnvi(GL_TEXTURE_ENV, GL_SOURCE1_RGB, p_second_operand_source);
+		}
 		glTexEnvi(GL_TEXTURE_ENV, GL_OPERAND1_RGB, GL_SRC_COLOR);
 	} else {
 		glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, _ff_env_mode_to_gl(p_env_mode));
@@ -317,6 +340,149 @@ static void _draw_skybox(RasterizerStorageGLFF *p_storage, const Transform &p_ca
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
 	glPopMatrix();
+}
+
+// godot-ports#31: whole-framebuffer glow/bloom. Fixed-function GL 1.2 has no
+// shaders and no framebuffer objects, so this can't be a real HDR threshold
+// pass -- it's the classic "capture the frame, force-sample a blurry small
+// mip, blend it back additively" trick instead: cheap, texture-only, and
+// entirely expressible with glCopyTexImage2D + GL_SGIS_generate_mipmap +
+// GL_TEXTURE_BASE_LEVEL/MAX_LEVEL, all of which are present in this project's
+// GL 1.2 floor (see has_generate_mipmap's capability comment in the header).
+// Deliberately no threshold/luminance-cap/HDR-bleed support (environment_set_
+// glow() ignores those params) -- everything above the ambient/opaque scene
+// bleeds into the blur uniformly, which reads close enough to "glow" for
+// this driver's vintage-hardware target and needs zero per-pixel math.
+static int _next_pot(int p_value) {
+	int p = 1;
+	while (p < p_value) {
+		p <<= 1;
+	}
+	return p;
+}
+
+void RasterizerSceneGLFF::_draw_glow(float p_intensity) {
+	if (!has_generate_mipmap) {
+		return;
+	}
+
+	GLint viewport[4];
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	int vp_w = viewport[2];
+	int vp_h = viewport[3];
+	if (vp_w <= 0 || vp_h <= 0) {
+		return;
+	}
+
+	// This driver (a real, live-tested finding on G4/RV250 -- confirmed via
+	// glGetError() returning GL_INVALID_VALUE, not a spec assumption)
+	// rejects glCopyTexImage2D at the viewport's actual size whenever
+	// either dimension isn't a power of two (a 2002-era chip, predating
+	// GL_ARB_texture_non_power_of_two). The standard fix: allocate the
+	// texture once at POT size via glTexImage2D (a plain empty allocation,
+	// no capture involved, so its size is unconstrained), then update just
+	// the used bottom-left sub-rectangle every frame via
+	// glCopyTexSubImage2D, which has no such POT requirement. Sample only
+	// that sub-rectangle's UV range thereafter (see quad_uv below) --
+	// never the full [0,1] range, which would also pull in the unused
+	// (undefined) padding this texture carries whenever vp_w/vp_h aren't
+	// already POT.
+	int pot_w = _next_pot(vp_w);
+	int pot_h = _next_pot(vp_h);
+
+	if (glow_capture_tex == 0) {
+		glGenTextures(1, &glow_capture_tex);
+	}
+	glBindTexture(GL_TEXTURE_2D, glow_capture_tex);
+
+	if (pot_w != glow_capture_pot_w || pot_h != glow_capture_pot_h) {
+		glow_capture_pot_w = pot_w;
+		glow_capture_pot_h = pot_h;
+		glTexParameteri(GL_TEXTURE_2D, GL_GENERATE_MIPMAP_SGIS, GL_TRUE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, pot_w, pot_h, 0, GL_RGB, GL_UNSIGNED_BYTE, nullptr);
+	}
+
+	// Capturing into a texture with GL_GENERATE_MIPMAP_SGIS enabled makes
+	// the driver regenerate the entire mip chain as a side effect of this
+	// call -- a real box-filtered downsample series, "for free."
+	glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, viewport[0], viewport[1], vp_w, vp_h);
+
+	// Force sampling from a small mip level instead of level 0 -- this is
+	// what actually produces the blur; ordinary GL_LINEAR magnification of
+	// a tiny image back up to full-screen size does the rest. Deliberately
+	// shallow (capped at 3, i.e. 1/8th resolution) rather than descending
+	// as deep as possible, matching this same live-tested caution as the
+	// POT fix above: this 2002-era driver's GL_SGIS_generate_mipmap chain
+	// is not assumed trustworthy many levels down without hardware
+	// verification, and a shallow level still gives a visible, if softer,
+	// bloom.
+	int level = 0;
+	int w = pot_w, h = pot_h;
+	while (level < 3 && w > 2 && h > 2) {
+		level++;
+		w >>= 1;
+		h >>= 1;
+	}
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, level);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, level);
+
+	glMatrixMode(GL_PROJECTION);
+	glPushMatrix();
+	glLoadIdentity();
+	glOrtho(0, 1, 0, 1, -1, 1);
+	glMatrixMode(GL_MODELVIEW);
+	glPushMatrix();
+	glLoadIdentity();
+
+	glDisable(GL_DEPTH_TEST);
+	glDepthMask(GL_FALSE);
+	glDisable(GL_LIGHTING);
+	glDisable(GL_CULL_FACE);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_NORMAL_ARRAY);
+
+	glEnable(GL_TEXTURE_2D);
+	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+	float intensity = CLAMP(p_intensity, 0.0f, 4.0f);
+	glColor4f(intensity, intensity, intensity, 1.0f);
+
+	glEnable(GL_BLEND);
+	glBlendEquation(GL_FUNC_ADD);
+	glBlendFunc(GL_ONE, GL_ONE);
+
+	// UVs sample only the real (bottom-left) sub-rectangle actually
+	// written by glCopyTexSubImage2D above, not the full [0,1] range --
+	// the rest of this POT-sized texture is unused padding.
+	float u_max = (float)vp_w / (float)pot_w;
+	float v_max = (float)vp_h / (float)pot_h;
+	const GLfloat quad_pos[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+	const GLfloat quad_uv[8] = { 0, 0, u_max, 0, u_max, v_max, 0, v_max };
+	glEnableClientState(GL_VERTEX_ARRAY);
+	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	glVertexPointer(2, GL_FLOAT, 0, quad_pos);
+	glTexCoordPointer(2, GL_FLOAT, 0, quad_uv);
+	glDrawArrays(GL_TRIANGLE_FAN, 0, 4);
+
+	glDisable(GL_BLEND);
+	glColor4f(1, 1, 1, 1);
+
+	// Reset the mip clamp back to the full chain -- this texture object is
+	// reused frame to frame (recaptured, not recreated), so a stale forced-
+	// small-mip range must not survive past this draw.
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_BASE_LEVEL, 0);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1000);
+
+	glMatrixMode(GL_PROJECTION);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
+	glPopMatrix();
+
+	glDepthMask(GL_TRUE);
+	glEnable(GL_DEPTH_TEST);
 }
 
 // Phase 3 (godot-ports#14 proposal): real mesh/material rendering, walking
@@ -483,6 +649,28 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 
 			bool matrix_pushed = false;
 
+			// godot-ports#34: real LightmapCapture ambient. lightmap_capture_data
+			// is 12 real captured colors (one per fixed cone-trace direction,
+			// baked by existing backend-independent engine code, see
+			// servers/visual/visual_server_scene.cpp's
+			// _update_instance_lightmap_captures) -- no per-pixel directional
+			// reconstruction here (that needs real per-fragment math this
+			// backend doesn't have), just their flat average as this
+			// instance's own GL_LIGHT_MODEL_AMBIENT override, restored back
+			// to the scene's own ambient_color once this instance's surfaces
+			// are done (see the matching restore at this loop's matrix_pushed
+			// cleanup below).
+			Color instance_ambient = ambient_color;
+			if (instance->lightmap_capture_data.size() == 12) {
+				float r = 0, g = 0, b = 0;
+				for (int c = 0; c < 12; c++) {
+					r += instance->lightmap_capture_data[c].r;
+					g += instance->lightmap_capture_data[c].g;
+					b += instance->lightmap_capture_data[c].b;
+				}
+				instance_ambient = Color(r / 12.0f, g / 12.0f, b / 12.0f, 1.0f);
+			}
+
 			for (int s = 0; s < mesh->surfaces.size(); s++) {
 				RasterizerStorageGLFF::Surface *surface = mesh->surfaces[s];
 				if (surface->vertex_count == 0) {
@@ -504,6 +692,9 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					_load_transform_gl(instance->transform, gl_model);
 					glMultMatrixf(gl_model);
 					matrix_pushed = true;
+
+					GLfloat inst_amb[4] = { instance_ambient.r, instance_ambient.g, instance_ambient.b, 1.0f };
+					glLightModelfv(GL_LIGHT_MODEL_AMBIENT, inst_amb);
 				}
 
 				Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
@@ -741,7 +932,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 							ff_tex = ff_tex->get_ptr();
 						}
 						GLenum second_operand_source = (u == 0) ? GL_PRIMARY_COLOR : GL_PREVIOUS;
-						bool wants_uv_array = _ff_setup_texture_unit(this, GL_TEXTURE0 + u, second_operand_source, ff_tex, mat->ff_env_mode[u], mat->ff_combine_func[u], mat->ff_texgen_mode[u]);
+						bool wants_uv_array = _ff_setup_texture_unit(this, GL_TEXTURE0 + u, second_operand_source, ff_tex, mat->ff_env_mode[u], mat->ff_combine_func[u], mat->ff_texgen_mode[u], mat->ff_dot3_light_direction);
 						if (ff_tex && wants_uv_array && surface->has_uvs) {
 							glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
 						} else if (ff_tex && wants_uv_array) {
@@ -879,9 +1070,22 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			}
 
 			if (matrix_pushed) {
+				GLfloat amb[4] = { ambient_color.r, ambient_color.g, ambient_color.b, 1.0f };
+				glLightModelfv(GL_LIGHT_MODEL_AMBIENT, amb);
 				glPopMatrix();
 			}
 		}
+	}
+
+	// godot-ports#31: capture+blur+blend the fully-composited opaque/
+	// blended scene built up above, before the cleanup below tears down
+	// the client-state this function's own draws relied on. Must run
+	// before that cleanup (glow re-establishes and then re-tears-down its
+	// own subset of it) and, being a screen-space post-process, is
+	// correctly placed after every real 3D draw call for this frame and
+	// before the 2D canvas pass that runs after render_scene() returns.
+	if (env && env->glow_enabled) {
+		_draw_glow(env->glow_intensity);
 	}
 
 	glDisableClientState(GL_VERTEX_ARRAY);
@@ -967,10 +1171,19 @@ void RasterizerSceneGLFF::initialize() {
 			}
 		}
 	}
+
+	// godot-ports#31: GL_SGIS_generate_mipmap gives us real driver-generated
+	// mip levels from a single glCopyTexImage2D capture, which is what makes
+	// a cheap fixed-function-era blur (force-sample a small mip, let normal
+	// bilinear magnification do the blur) possible at all.
+	has_generate_mipmap = ext && strstr(ext, "GL_SGIS_generate_mipmap") != nullptr;
 }
 
 RasterizerSceneGLFF::RasterizerSceneGLFF() {
 	storage = nullptr;
+	glow_capture_tex = 0;
+	glow_capture_pot_w = 0;
+	glow_capture_pot_h = 0;
 }
 
 RasterizerSceneGLFF::~RasterizerSceneGLFF() {
