@@ -1134,7 +1134,11 @@ void ArrayMesh::_get_property_list(List<PropertyInfo> *p_list) const {
 		if (surfaces[i].is_2d) {
 			p_list->push_back(PropertyInfo(Variant::OBJECT, "surface_" + itos(i + 1) + "/material", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial,CanvasItemMaterial", PROPERTY_USAGE_EDITOR));
 		} else {
-			p_list->push_back(PropertyInfo(Variant::OBJECT, "surface_" + itos(i + 1) + "/material", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial,SpatialMaterial,ORMSpatialMaterial", PROPERTY_USAGE_EDITOR));
+			// godot-ports#35: FixedFunctionMaterial added alongside the
+			// stock material types so it's selectable from this dropdown --
+			// a no-op on GLES2/GLES3, same as the others being selectable
+			// regardless of which renderer happens to be active.
+			p_list->push_back(PropertyInfo(Variant::OBJECT, "surface_" + itos(i + 1) + "/material", PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial,SpatialMaterial,ORMSpatialMaterial,FixedFunctionMaterial", PROPERTY_USAGE_EDITOR));
 		}
 	}
 }

@@ -104,7 +104,11 @@ void MeshInstance::_get_property_list(List<PropertyInfo> *p_list) const {
 
 	if (mesh.is_valid()) {
 		for (int i = 0; i < mesh->get_surface_count(); i++) {
-			p_list->push_back(PropertyInfo(Variant::OBJECT, vformat("%s/%d", PNAME("material"), i), PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial,SpatialMaterial,ORMSpatialMaterial"));
+			// godot-ports#35: FixedFunctionMaterial added alongside the
+			// stock material types so it's selectable from this dropdown --
+			// a no-op on GLES2/GLES3, same as the others being selectable
+			// regardless of which renderer happens to be active.
+			p_list->push_back(PropertyInfo(Variant::OBJECT, vformat("%s/%d", PNAME("material"), i), PROPERTY_HINT_RESOURCE_TYPE, "ShaderMaterial,SpatialMaterial,ORMSpatialMaterial,FixedFunctionMaterial"));
 		}
 	}
 }
