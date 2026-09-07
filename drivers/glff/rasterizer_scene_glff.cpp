@@ -1169,7 +1169,32 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				// code path (2D canvas rendering, other materials in this
 				// same pass) that assumes GL_TEXTURE0 is always the active
 				// unit and never touches multitexture at all.
+				//
+				// Switching which unit is ACTIVE is not enough on its own --
+				// GL_TEXTURE_2D's enabled state is tracked independently
+				// PER UNIT, not just on whichever unit is currently active.
+				// _ff_setup_texture_unit() enables unit 1+ directly and
+				// nothing else ever disables it again once this material's
+				// draw is done, so it stayed permanently enabled/bound/
+				// combining for the rest of the frame (and every frame
+				// after) -- a real, confirmed bug: an FF material using 2+
+				// units visibly tinted the ENTIRE editor (2D UI panels,
+				// unrelated 3D geometry, the skydome) with its unit-1
+				// texture, and is the likely trigger for a real ATI driver
+				// hang seen switching Env Mode to Combine afterward (the
+				// driver ending up evaluating an inconsistent multi-unit
+				// combiner state across units the rest of the code never
+				// expected to still be active). Explicitly disable every
+				// unit above 0 here, not just re-select unit 0.
 				if (has_multitexture && (highest_unit_used > 0 || (mat && mat->ff_active))) {
+					for (int u = 1; u < RasterizerStorageGLFF::FF_TEXTURE_UNIT_MAX; u++) {
+						glActiveTexture(GL_TEXTURE0 + u);
+						glClientActiveTexture(GL_TEXTURE0 + u);
+						glDisable(GL_TEXTURE_2D);
+						glDisable(GL_TEXTURE_GEN_S);
+						glDisable(GL_TEXTURE_GEN_T);
+						glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+					}
 					glClientActiveTexture(GL_TEXTURE0);
 					glActiveTexture(GL_TEXTURE0);
 				}
