@@ -5995,6 +5995,23 @@ void SpatialEditor::_init_indicators() {
 				int n = 128; // number of circle segments
 				int m = 3; // number of thickness segments
 
+				// godot-ports#39: on every other backend, the m=3 "thickness
+				// segment" vertices per circle segment are baked at the
+				// exact same 3D position (differing only in normal) --
+				// rotate_shader's vertex() below turns them into a real,
+				// thin visible ring edge by conditionally offsetting
+				// whichever one is roughly grazing-angle-on to the camera
+				// (VERTEX += NORMAL*0.02). GLFF is strict fixed-function
+				// and can never execute that (or any) vertex shader, so
+				// without this, every triangle in this mesh is genuinely
+				// degenerate (zero area) -- confirmed live, 0 of 768
+				// triangles non-degenerate, nothing ever rasterizes. Bake
+				// the same small offset unconditionally instead, so GLFF
+				// gets a real (if always slightly faceted, not
+				// dynamically-thinned) non-degenerate ring; every other
+				// backend keeps the exact original behavior untouched.
+				const bool is_glff = OS::get_singleton()->get_current_video_driver() == OS::VIDEO_DRIVER_GLFF;
+
 				for (int j = 0; j < n; ++j) {
 					Basis basis = Basis(ivec, (Math_PI * 2.0f * j) / n);
 					Vector3 vertex = basis.xform(ivec2 * GIZMO_CIRCLE_SIZE);
@@ -6002,7 +6019,7 @@ void SpatialEditor::_init_indicators() {
 						Vector2 ofs = Vector2(Math::cos((Math_PI * 2.0 * k) / m), Math::sin((Math_PI * 2.0 * k) / m));
 						Vector3 normal = ivec * ofs.x + ivec2 * ofs.y;
 						surftool->add_normal(basis.xform(normal));
-						surftool->add_vertex(vertex);
+						surftool->add_vertex(is_glff ? vertex + basis.xform(normal) * 0.02 : vertex);
 					}
 				}
 
