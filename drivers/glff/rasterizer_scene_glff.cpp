@@ -136,6 +136,40 @@ static GLenum _ff_texgen_mode_to_gl(int p_mode) {
 // up with real texture-coordinate-array data the caller should still
 // supply (i.e. textured but NOT using texgen, which generates its own
 // coordinates and makes the vertex array's UVs irrelevant for this unit).
+// godot-ports#42: non-POT textures allocate real GL storage at the next
+// POT size (godot-ports#40) and only populate their top-left
+// logical-size sub-rect -- 3D consumers (unlike 2D canvas commands,
+// which rebuild a fresh UV array per draw) read mesh-baked UVs from a
+// shared vertex array that can't be rescaled in place, so this rescales
+// via the fixed-function texture matrix instead, transparently on top
+// of whatever coordinates (vertex-array or texgen-generated) actually
+// reach the unit. A no-op (identity scale) whenever a texture's real
+// size is already POT.
+static void _get_tex_uv_scale_3d(const RasterizerStorageGLFF::Texture *p_tex, float &r_scale_u, float &r_scale_v) {
+	r_scale_u = 1.0f;
+	r_scale_v = 1.0f;
+	if (p_tex && p_tex->gl_alloc_width > 0 && p_tex->gl_alloc_height > 0) {
+		r_scale_u = (float)p_tex->width / (float)p_tex->gl_alloc_width;
+		r_scale_v = (float)p_tex->height / (float)p_tex->gl_alloc_height;
+	}
+}
+
+// Sets (or resets to identity) the CURRENTLY ACTIVE texture unit's texture
+// matrix -- caller must have already called glActiveTexture() for the
+// unit it wants affected. Always called, never conditionally skipped, so
+// no surface/unit can ever leak a stale non-identity scale into a later
+// draw that isn't expecting one.
+static void _set_tex_matrix_scale(const RasterizerStorageGLFF::Texture *p_tex) {
+	float scale_u, scale_v;
+	_get_tex_uv_scale_3d(p_tex, scale_u, scale_v);
+	glMatrixMode(GL_TEXTURE);
+	glLoadIdentity();
+	if (scale_u != 1.0f || scale_v != 1.0f) {
+		glScalef(scale_u, scale_v, 1.0f);
+	}
+	glMatrixMode(GL_MODELVIEW);
+}
+
 static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_texture_unit, GLenum p_second_operand_source, RasterizerStorageGLFF::Texture *p_tex, int p_env_mode, int p_combine_func, int p_texgen_mode, const Vector3 &p_dot3_light_direction) {
 	if (p_scene->has_multitexture) {
 		glActiveTexture(p_gl_texture_unit);
@@ -150,11 +184,13 @@ static bool _ff_setup_texture_unit(RasterizerSceneGLFF *p_scene, GLenum p_gl_tex
 
 	if (!p_tex) {
 		glDisable(GL_TEXTURE_2D);
+		_set_tex_matrix_scale(nullptr); // reset to identity -- this unit may be reused unscaled elsewhere
 		return false;
 	}
 
 	glEnable(GL_TEXTURE_2D);
 	glBindTexture(GL_TEXTURE_2D, p_tex->tex_id);
+	_set_tex_matrix_scale(p_tex);
 
 	if (p_env_mode == 4 /* ENV_COMBINE */ && p_scene->has_texture_env_combine) {
 		GLenum combine_func = _ff_combine_func_to_gl(p_combine_func);
@@ -331,11 +367,29 @@ static void _draw_skybox(RasterizerStorageGLFF *p_storage, const Transform &p_ca
 	glBindTexture(GL_TEXTURE_2D, tex->tex_id);
 	glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_REPLACE);
 
+	// godot-ports#42: rescale for a non-POT panorama texture (godot-ports#40
+	// pads its real GL storage to the next POT size) -- pushed/popped so
+	// this self-contained function can never leak a non-identity texture
+	// matrix into the main pass that follows.
+	float scale_u, scale_v;
+	_get_tex_uv_scale_3d(tex, scale_u, scale_v);
+	glMatrixMode(GL_TEXTURE);
+	glPushMatrix();
+	glLoadIdentity();
+	if (scale_u != 1.0f || scale_v != 1.0f) {
+		glScalef(scale_u, scale_v, 1.0f);
+	}
+	glMatrixMode(GL_MODELVIEW);
+
 	glEnableClientState(GL_VERTEX_ARRAY);
 	glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 	glVertexPointer(3, GL_FLOAT, sizeof(_SkyboxVertex), &verts->ptr()[0].pos[0]);
 	glTexCoordPointer(2, GL_FLOAT, sizeof(_SkyboxVertex), &verts->ptr()[0].uv[0]);
 	glDrawArrays(GL_TRIANGLES, 0, verts->size());
+
+	glMatrixMode(GL_TEXTURE);
+	glPopMatrix();
+	glMatrixMode(GL_MODELVIEW);
 
 	glDepthMask(GL_TRUE);
 	glEnable(GL_DEPTH_TEST);
@@ -984,12 +1038,14 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					glEnable(GL_TEXTURE_2D);
 					glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
 					glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+					_set_tex_matrix_scale(tex); // godot-ports#42
 					ur = surface->uvs.read();
 					glEnableClientState(GL_TEXTURE_COORD_ARRAY);
 					glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
 				} else {
 					glDisable(GL_TEXTURE_2D);
 					glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+					_set_tex_matrix_scale(nullptr); // godot-ports#42: reset GL_TEXTURE0, the unit this branch's sibling above uses
 				}
 
 				GLenum gl_primitive = _primitive_to_gl(surface->primitive);
@@ -1037,9 +1093,21 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 						// lightmap textures (a plain scale+offset) -- the
 						// fixed-function texture matrix does this for free,
 						// no need to touch the vertex array itself.
+						// godot-ports#42: composed with the lightmap
+						// texture's own POT-padding scale (godot-ports#40),
+						// since lightmap_uv_rect is normalized against its
+						// LOGICAL size, not the real (possibly POT-padded)
+						// GL storage -- applied outermost so it maps the
+						// atlas-remapped coordinate into the real texture's
+						// populated sub-rect.
+						float lm_scale_u, lm_scale_v;
+						_get_tex_uv_scale_3d(lightmap_tex, lm_scale_u, lm_scale_v);
 						glMatrixMode(GL_TEXTURE);
 						glPushMatrix();
 						glLoadIdentity();
+						if (lm_scale_u != 1.0f || lm_scale_v != 1.0f) {
+							glScalef(lm_scale_u, lm_scale_v, 1.0f);
+						}
 						const Rect2 &uv_rect = instance->lightmap_uv_rect;
 						glTranslatef(uv_rect.position.x, uv_rect.position.y, 0.0f);
 						glScalef(uv_rect.size.x, uv_rect.size.y, 1.0f);
