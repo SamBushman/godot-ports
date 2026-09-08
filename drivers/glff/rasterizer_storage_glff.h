@@ -270,6 +270,26 @@ public:
 		bool albedo_from_vertex_color;
 		bool use_alpha_scissor;
 		bool emission_enabled;
+		// godot-ports#45: billboard_mode is the SAME "baked into the
+		// generated vertex-shader BODY" category as
+		// albedo_from_vertex_color/use_alpha_scissor above, not a
+		// render_mode token -- Material3D::_update_shader() emits a real
+		// MODELVIEW_MATRIX-overwrite statement per mode (see
+		// scene/resources/material.cpp's own billboard_mode switch), a
+		// genuine per-frame camera-relative vertex-shader computation
+		// GLFF (no vertex shader stage at all) can never execute. Detected
+		// via the same exact-literal-substring technique, each mode's own
+		// distinguishing fragment of that fork's deterministic generated
+		// code. GLFF's own real substitute (a CPU-computed equivalent
+		// MODELVIEW_MATRIX, applied per-instance at draw time) lives in
+		// RasterizerSceneGLFF::render_scene()'s MULTIMESH block.
+		enum BillboardMode {
+			BILLBOARD_DISABLED,
+			BILLBOARD_ENABLED,
+			BILLBOARD_FIXED_Y,
+			BILLBOARD_PARTICLES,
+		};
+		BillboardMode billboard_mode;
 		String code;
 
 		Shader() {
@@ -282,6 +302,7 @@ public:
 			albedo_from_vertex_color = false;
 			use_alpha_scissor = false;
 			emission_enabled = false;
+			billboard_mode = BILLBOARD_DISABLED;
 		}
 	};
 	mutable RID_Owner<Shader> shader_owner;
@@ -334,6 +355,19 @@ public:
 		s->albedo_from_vertex_color = p_code.find("albedo_tex *= COLOR;") != -1;
 		s->use_alpha_scissor = p_code.find("ALPHA_SCISSOR=alpha_scissor_threshold;") != -1;
 		s->emission_enabled = p_code.find("uniform vec4 emission : hint_color;") != -1;
+
+		// godot-ports#45: billboard_mode, same body-marker technique --
+		// each mode's own real, distinguishing generated-code fragment
+		// (see Shader::BillboardMode's own comment above).
+		if (p_code.find("mat_world = mat4(normalize(CAMERA_MATRIX[0])*length(WORLD_MATRIX[0])") != -1) {
+			s->billboard_mode = Shader::BILLBOARD_PARTICLES;
+		} else if (p_code.find("normalize(cross(vec3(0.0, 1.0, 0.0), CAMERA_MATRIX[2].xyz))") != -1) {
+			s->billboard_mode = Shader::BILLBOARD_FIXED_Y;
+		} else if (p_code.find("MODELVIEW_MATRIX = INV_CAMERA_MATRIX * mat4(CAMERA_MATRIX[0],CAMERA_MATRIX[1],CAMERA_MATRIX[2],WORLD_MATRIX[3]);") != -1) {
+			s->billboard_mode = Shader::BILLBOARD_ENABLED;
+		} else {
+			s->billboard_mode = Shader::BILLBOARD_DISABLED;
+		}
 	}
 	virtual String shader_get_code(RID p_shader) const {
 		Shader *s = shader_owner.getornull(p_shader);
@@ -439,6 +473,23 @@ public:
 		// scene has no directional light.
 		bool ff_dot3_dynamic_light;
 
+		// godot-ports#45 (gizmo-handle point-size follow-up): real
+		// SpatialMaterial "point_size" param (Material3D::set_point_size(),
+		// sent via material_set_param() under the exact key
+		// scene/resources/material.cpp's ShaderNames uses -- confirmed by
+		// reading it directly). Editor gizmo handle markers
+		// (editor/plugins/spatial_editor_plugin.cpp's own
+		// FLAG_USE_POINT_SIZE handle_material) are real
+		// VS::PRIMITIVE_POINTS geometry -- already correctly mapped to
+		// GL_POINTS by this backend's own _primitive_to_gl(), a real core
+		// GL 1.0 primitive type needing no billboard trick at all (a
+		// point sprite is inherently always screen-facing) -- but nothing
+		// in this backend ever called glPointSize(), so every point
+		// primitive rendered at OpenGL's own default (1px) regardless of
+		// this value. Applied in render_scene()'s main draw loop,
+		// immediately before any PRIMITIVE_POINTS draw call.
+		float point_size;
+
 		Material() {
 			albedo = Color(1, 1, 1, 1);
 			emission = Color(0, 0, 0, 1);
@@ -446,6 +497,7 @@ public:
 			specular = 0.5;
 			roughness = 1.0;
 			alpha_scissor_threshold = 0.5;
+			point_size = 1.0;
 			ff_active = false;
 			for (int i = 0; i < FF_TEXTURE_UNIT_MAX; i++) {
 				ff_env_mode[i] = 0;
@@ -494,6 +546,8 @@ public:
 			m->roughness = p_value;
 		} else if (p_param == StringName("alpha_scissor_threshold")) {
 			m->alpha_scissor_threshold = p_value;
+		} else if (p_param == StringName("point_size")) {
+			m->point_size = p_value;
 		} else if (p_param == StringName("ff_active")) {
 			m->ff_active = p_value;
 		} else if (p_param == StringName("ff_cull_mode")) {
@@ -648,29 +702,73 @@ public:
 	virtual AABB mesh_get_aabb(RID p_mesh, RID p_skeleton) const;
 	virtual void mesh_clear(RID p_mesh);
 
-	/* MULTIMESH (stub -- confirmed in research that GLES2 already submits
-	   each instance as a separate CPU-side draw call, not real GPU
-	   instancing, so a real implementation here is just "call
-	   mesh rendering once per instance transform" -- deferred to whichever
-	   phase wires up RasterizerScene's instance loop, not needed to
-	   compile Phase 1) */
+	/* MULTIMESH -- RESOLVED (godot-ports#45). Real per-instance data storage,
+	   matching GLES2's own real bulk-array layout exactly (confirmed by
+	   reading drivers/gles2/rasterizer_storage_gles2.cpp's own
+	   _multimesh_allocate()/_multimesh_set_as_bulk_array() and
+	   scene/3d/cpu_particles.h's own _fill_particle_data(), the real
+	   producer CPUParticles uses -- this is a shared, backend-agnostic
+	   core format, not something GLES2-specific being copied by
+	   coincidence): per instance, `xform_floats` (12 for 3D: three rows of
+	   [basisRow.x, basisRow.y, basisRow.z, originComponent], real
+	   row-major affine, matching this project's own established
+	   [[feedback_godot_transform_serialization_convention]]) then
+	   `color_floats` (1 float holding 4 packed bytes for COLOR_8BIT, or 4
+	   real floats for COLOR_FLOAT) then `custom_data_floats` (same 1-or-4
+	   shape). No real GPU instancing exists on GL 1.2 -- rendering is a
+	   real per-instance CPU loop (`RasterizerSceneGLFF::render_scene()`,
+	   see its own MULTIMESH block), matching this project's own
+	   already-established "GLES2 already does CPU-side per-instance
+	   draws" precedent (#16's original design audit). */
 
 	struct MultiMesh : public RID_Data {
 		RID mesh;
 		int instance_count;
+		VS::MultimeshTransformFormat transform_format;
+		VS::MultimeshColorFormat color_format;
+		VS::MultimeshCustomDataFormat custom_data_format;
+		Vector<float> data;
+		int xform_floats;
+		int color_floats;
+		int custom_data_floats;
+		AABB aabb;
+		int visible_instances;
+
+		int stride() const { return xform_floats + color_floats + custom_data_floats; }
+
+		MultiMesh() {
+			instance_count = 0;
+			transform_format = VS::MULTIMESH_TRANSFORM_2D;
+			color_format = VS::MULTIMESH_COLOR_NONE;
+			custom_data_format = VS::MULTIMESH_CUSTOM_DATA_NONE;
+			xform_floats = 0;
+			color_floats = 0;
+			custom_data_floats = 0;
+			visible_instances = -1;
+		}
 	};
 	mutable RID_Owner<MultiMesh> multimesh_owner;
 
 	virtual void multimesh_attach_canvas_item(RID p_multimesh, RID p_canvas_item, bool p_attach) {}
 	virtual RID _multimesh_create() {
 		MultiMesh *mm = memnew(MultiMesh);
-		mm->instance_count = 0;
 		return multimesh_owner.make_rid(mm);
 	}
 	virtual void _multimesh_allocate(RID p_multimesh, int p_instances, VS::MultimeshTransformFormat p_transform_format, VS::MultimeshColorFormat p_color_format, VS::MultimeshCustomDataFormat p_data = VS::MULTIMESH_CUSTOM_DATA_NONE) {
 		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
 		ERR_FAIL_COND(!mm);
 		mm->instance_count = p_instances;
+		mm->transform_format = p_transform_format;
+		mm->color_format = p_color_format;
+		mm->custom_data_format = p_data;
+		mm->xform_floats = (p_transform_format == VS::MULTIMESH_TRANSFORM_2D) ? 8 : 12;
+		mm->color_floats = (p_color_format == VS::MULTIMESH_COLOR_8BIT) ? 1 : (p_color_format == VS::MULTIMESH_COLOR_FLOAT ? 4 : 0);
+		mm->custom_data_floats = (p_data == VS::MULTIMESH_CUSTOM_DATA_8BIT) ? 1 : (p_data == VS::MULTIMESH_CUSTOM_DATA_FLOAT ? 4 : 0);
+		mm->data.resize(mm->stride() * p_instances);
+		for (int i = 0; i < mm->data.size(); i++) {
+			mm->data.write[i] = 0.0f;
+		}
+		mm->aabb = AABB();
 	}
 	virtual int _multimesh_get_instance_count(RID p_multimesh) const {
 		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
@@ -682,23 +780,175 @@ public:
 		ERR_FAIL_COND(!mm);
 		mm->mesh = p_mesh;
 	}
-	virtual void _multimesh_instance_set_transform(RID p_multimesh, int p_index, const Transform &p_transform) {}
+	virtual void _multimesh_instance_set_transform(RID p_multimesh, int p_index, const Transform &p_transform) {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND(!mm);
+		ERR_FAIL_INDEX(p_index, mm->instance_count);
+		if (mm->transform_format != VS::MULTIMESH_TRANSFORM_3D) {
+			return;
+		}
+		float *d = mm->data.ptrw() + p_index * mm->stride();
+		d[0] = p_transform.basis.elements[0][0];
+		d[1] = p_transform.basis.elements[0][1];
+		d[2] = p_transform.basis.elements[0][2];
+		d[3] = p_transform.origin.x;
+		d[4] = p_transform.basis.elements[1][0];
+		d[5] = p_transform.basis.elements[1][1];
+		d[6] = p_transform.basis.elements[1][2];
+		d[7] = p_transform.origin.y;
+		d[8] = p_transform.basis.elements[2][0];
+		d[9] = p_transform.basis.elements[2][1];
+		d[10] = p_transform.basis.elements[2][2];
+		d[11] = p_transform.origin.z;
+	}
+	// CPUParticles2D's own 2D transform/render path is out of scope for
+	// this pass (godot-ports#45 scoped to 3D CPUParticles + the shared
+	// billboard-mode gap) -- real, explicit no-op, not silently missing.
 	virtual void _multimesh_instance_set_transform_2d(RID p_multimesh, int p_index, const Transform2D &p_transform) {}
-	virtual void _multimesh_instance_set_color(RID p_multimesh, int p_index, const Color &p_color) {}
-	virtual void _multimesh_instance_set_custom_data(RID p_multimesh, int p_index, const Color &p_color) {}
+	virtual void _multimesh_instance_set_color(RID p_multimesh, int p_index, const Color &p_color) {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND(!mm);
+		ERR_FAIL_INDEX(p_index, mm->instance_count);
+		if (mm->color_floats == 0) {
+			return;
+		}
+		float *d = mm->data.ptrw() + p_index * mm->stride() + mm->xform_floats;
+		if (mm->color_format == VS::MULTIMESH_COLOR_8BIT) {
+			uint8_t *d8 = (uint8_t *)d;
+			d8[0] = CLAMP(p_color.r * 255.0, 0, 255);
+			d8[1] = CLAMP(p_color.g * 255.0, 0, 255);
+			d8[2] = CLAMP(p_color.b * 255.0, 0, 255);
+			d8[3] = CLAMP(p_color.a * 255.0, 0, 255);
+		} else {
+			d[0] = p_color.r;
+			d[1] = p_color.g;
+			d[2] = p_color.b;
+			d[3] = p_color.a;
+		}
+	}
+	virtual void _multimesh_instance_set_custom_data(RID p_multimesh, int p_index, const Color &p_color) {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND(!mm);
+		ERR_FAIL_INDEX(p_index, mm->instance_count);
+		if (mm->custom_data_floats == 0) {
+			return;
+		}
+		float *d = mm->data.ptrw() + p_index * mm->stride() + mm->xform_floats + mm->color_floats;
+		if (mm->custom_data_format == VS::MULTIMESH_CUSTOM_DATA_8BIT) {
+			uint8_t *d8 = (uint8_t *)d;
+			d8[0] = CLAMP(p_color.r * 255.0, 0, 255);
+			d8[1] = CLAMP(p_color.g * 255.0, 0, 255);
+			d8[2] = CLAMP(p_color.b * 255.0, 0, 255);
+			d8[3] = CLAMP(p_color.a * 255.0, 0, 255);
+		} else {
+			d[0] = p_color.r;
+			d[1] = p_color.g;
+			d[2] = p_color.b;
+			d[3] = p_color.a;
+		}
+	}
 	virtual RID _multimesh_get_mesh(RID p_multimesh) const {
 		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
 		ERR_FAIL_COND_V(!mm, RID());
 		return mm->mesh;
 	}
-	virtual Transform _multimesh_instance_get_transform(RID p_multimesh, int p_index) const { return Transform(); }
+	virtual Transform _multimesh_instance_get_transform(RID p_multimesh, int p_index) const {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND_V(!mm, Transform());
+		ERR_FAIL_INDEX_V(p_index, mm->instance_count, Transform());
+		Transform t;
+		if (mm->transform_format == VS::MULTIMESH_TRANSFORM_3D) {
+			const float *d = mm->data.ptr() + p_index * mm->stride();
+			t.basis.elements[0] = Vector3(d[0], d[1], d[2]);
+			t.basis.elements[1] = Vector3(d[4], d[5], d[6]);
+			t.basis.elements[2] = Vector3(d[8], d[9], d[10]);
+			t.origin = Vector3(d[3], d[7], d[11]);
+		}
+		return t;
+	}
 	virtual Transform2D _multimesh_instance_get_transform_2d(RID p_multimesh, int p_index) const { return Transform2D(); }
-	virtual Color _multimesh_instance_get_color(RID p_multimesh, int p_index) const { return Color(); }
-	virtual Color _multimesh_instance_get_custom_data(RID p_multimesh, int p_index) const { return Color(); }
-	virtual void _multimesh_set_as_bulk_array(RID p_multimesh, const PoolVector<float> &p_array) {}
-	virtual void _multimesh_set_visible_instances(RID p_multimesh, int p_visible) {}
-	virtual int _multimesh_get_visible_instances(RID p_multimesh) const { return -1; }
-	virtual AABB _multimesh_get_aabb(RID p_multimesh) const { return AABB(); }
+	virtual Color _multimesh_instance_get_color(RID p_multimesh, int p_index) const {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND_V(!mm, Color());
+		ERR_FAIL_INDEX_V(p_index, mm->instance_count, Color());
+		if (mm->color_floats == 0) {
+			return Color(1, 1, 1, 1);
+		}
+		const float *d = mm->data.ptr() + p_index * mm->stride() + mm->xform_floats;
+		if (mm->color_format == VS::MULTIMESH_COLOR_8BIT) {
+			const uint8_t *d8 = (const uint8_t *)d;
+			return Color(d8[0] / 255.0f, d8[1] / 255.0f, d8[2] / 255.0f, d8[3] / 255.0f);
+		}
+		return Color(d[0], d[1], d[2], d[3]);
+	}
+	virtual Color _multimesh_instance_get_custom_data(RID p_multimesh, int p_index) const {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND_V(!mm, Color());
+		ERR_FAIL_INDEX_V(p_index, mm->instance_count, Color());
+		if (mm->custom_data_floats == 0) {
+			return Color(0, 0, 0, 0);
+		}
+		const float *d = mm->data.ptr() + p_index * mm->stride() + mm->xform_floats + mm->color_floats;
+		if (mm->custom_data_format == VS::MULTIMESH_CUSTOM_DATA_8BIT) {
+			const uint8_t *d8 = (const uint8_t *)d;
+			return Color(d8[0] / 255.0f, d8[1] / 255.0f, d8[2] / 255.0f, d8[3] / 255.0f);
+		}
+		return Color(d[0], d[1], d[2], d[3]);
+	}
+	virtual void _multimesh_set_as_bulk_array(RID p_multimesh, const PoolVector<float> &p_array) {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND(!mm);
+		ERR_FAIL_COND(mm->data.size() != p_array.size());
+		PoolVector<float>::Read r = p_array.read();
+		for (int i = 0; i < mm->data.size(); i++) {
+			mm->data.write[i] = r[i];
+		}
+		// Real AABB: merge the mesh's own real AABB, transformed by every
+		// real active instance (real == non-zero transform basis -- an
+		// inactive CPUParticles slot is written as an all-zero transform,
+		// see cpu_particles.h's own _fill_particle_data()). Errs toward
+		// inclusive (an empty/degenerate result is safe -- worse case is
+		// "not culled early", never "wrongly culled and invisible").
+		mm->aabb = AABB();
+		bool first = true;
+		if (mm->transform_format == VS::MULTIMESH_TRANSFORM_3D && mesh_owner.owns(mm->mesh)) {
+			AABB mesh_aabb = mesh_get_aabb(mm->mesh, RID());
+			int stride = mm->stride();
+			for (int i = 0; i < mm->instance_count; i++) {
+				const float *d = mm->data.ptr() + i * stride;
+				if (d[0] == 0 && d[1] == 0 && d[2] == 0 && d[4] == 0 && d[5] == 0 && d[6] == 0 && d[8] == 0 && d[9] == 0 && d[10] == 0) {
+					continue; // zeroed/inactive slot
+				}
+				Transform t;
+				t.basis.elements[0] = Vector3(d[0], d[1], d[2]);
+				t.basis.elements[1] = Vector3(d[4], d[5], d[6]);
+				t.basis.elements[2] = Vector3(d[8], d[9], d[10]);
+				t.origin = Vector3(d[3], d[7], d[11]);
+				AABB xformed = t.xform(mesh_aabb);
+				if (first) {
+					mm->aabb = xformed;
+					first = false;
+				} else {
+					mm->aabb.merge_with(xformed);
+				}
+			}
+		}
+	}
+	virtual void _multimesh_set_visible_instances(RID p_multimesh, int p_visible) {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND(!mm);
+		mm->visible_instances = p_visible;
+	}
+	virtual int _multimesh_get_visible_instances(RID p_multimesh) const {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND_V(!mm, -1);
+		return mm->visible_instances;
+	}
+	virtual AABB _multimesh_get_aabb(RID p_multimesh) const {
+		MultiMesh *mm = multimesh_owner.getornull(p_multimesh);
+		ERR_FAIL_COND_V(!mm, AABB());
+		return mm->aabb;
+	}
 	virtual MMInterpolator *_multimesh_get_interpolator(RID p_multimesh) const { return nullptr; }
 
 	/* IMMEDIATE (stub -- editor/debug immediate-mode draw calls; low

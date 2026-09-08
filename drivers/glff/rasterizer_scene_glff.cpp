@@ -822,6 +822,230 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	glDisableClientState(GL_NORMAL_ARRAY);
 }
 
+// godot-ports#45: real per-instance CPU-side rendering for
+// VS::INSTANCE_MULTIMESH (CPUParticles/CPUParticles3D's own backing
+// instance type -- confirmed by reading scene/3d/cpu_particles.cpp/.h
+// directly, not assumed: it allocates a real MultiMesh, packs per-particle
+// state via CPUParticles::_fill_particle_data() into the exact layout
+// RasterizerStorageGLFF::MultiMesh now stores for real, and pushes it via
+// multimesh_set_as_bulk_array() every frame). No real GPU instancing
+// exists on GL 1.2 -- one real glDrawElements/glDrawArrays per active
+// instance, matching this project's own already-established "GLES2 also
+// does CPU-side per-instance MultiMesh draws" precedent (#16's design
+// audit).
+//
+// Real root cause this issue actually chases: Material3D's billboard
+// modes (BILLBOARD_ENABLED/BILLBOARD_FIXED_Y/BILLBOARD_PARTICLES -- the
+// latter is what a real ParticlesMaterial-driven CPUParticles node's own
+// SpatialMaterial sets) are implemented by overwriting MODELVIEW_MATRIX in
+// generated vertex-shader code, computed live from CAMERA_MATRIX/
+// INV_CAMERA_MATRIX/WORLD_MATRIX every frame (scene/resources/material.cpp,
+// confirmed by direct read, not inferred from the #39 gizmo precedent
+// alone) -- a real per-frame camera-relative computation GLFF (no vertex
+// shader stage at all) can never execute. This function computes the SAME
+// real math on the CPU instead, per active particle instance, replacing
+// the instance's own world-space basis before it reaches
+// glMultMatrixf() -- see each BillboardMode case below for the literal
+// GLSL formula it mirrors.
+//
+// Real, explicit scope cuts (not oversights): only the plain-SpatialMaterial
+// albedo/texture/lighting path is supported for multimesh instances --
+// FixedFunctionMaterial's own multi-texture-unit combiner state
+// (godot-ports#35) is NOT replicated here, since every real
+// ParticlesMaterial-driven particle system this project has needed so far
+// authors a plain SpatialMaterial with a billboard mode, never
+// FixedFunctionMaterial. BILLBOARD_PARTICLES' own animation-frame UV
+// sub-feature (particles_anim_h_frames/v_frames spritesheet flipbook) is
+// also NOT implemented this pass -- particles render with the material's
+// whole texture/UV as authored, no flipbook animation; a real, flagged
+// remainder, not silently dropped. Multimesh instances neither cast nor
+// receive the #26 shadow-volume pass or the #23 baked-lightmap pass
+// (both scoped to INSTANCE_MESH only, and neither is a common particle
+// use case).
+static void _render_multimesh_instances(RasterizerStorageGLFF *p_storage, const Transform &p_cam_transform, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count, int p_max_lights) {
+	for (int i = 0; i < p_cull_count; i++) {
+		RasterizerScene::InstanceBase *instance = p_cull_result[i];
+		if (!instance->visible || instance->base_type != VS::INSTANCE_MULTIMESH) {
+			continue;
+		}
+		RasterizerStorageGLFF::MultiMesh *mm = p_storage->multimesh_owner.getornull(instance->base);
+		if (!mm || !mm->mesh.is_valid() || mm->transform_format != VS::MULTIMESH_TRANSFORM_3D) {
+			continue;
+		}
+		RasterizerStorageGLFF::Mesh *mesh = p_storage->mesh_owner.getornull(mm->mesh);
+		if (!mesh) {
+			continue;
+		}
+
+		RID mat_rid;
+		if (instance->material_override.is_valid()) {
+			mat_rid = instance->material_override;
+		} else if (instance->materials.size() > 0 && instance->materials[0].is_valid()) {
+			mat_rid = instance->materials[0];
+		} else if (mesh->surfaces.size() > 0) {
+			mat_rid = mesh->surfaces[0]->material;
+		}
+		RasterizerStorageGLFF::Material *mat = p_storage->material_owner.getornull(mat_rid);
+		RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? p_storage->shader_owner.getornull(mat->shader) : nullptr;
+
+		bool surface_unshaded = (mat && mat->ff_active) ? mat->ff_unshaded : (shader && shader->unshaded);
+		if (surface_unshaded || p_max_lights == 0) {
+			glDisable(GL_LIGHTING);
+		} else {
+			glEnable(GL_LIGHTING);
+		}
+
+		Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
+		RasterizerStorageGLFF::Texture *tex = (mat && mat->albedo_texture.is_valid()) ? p_storage->texture_owner.getornull(mat->albedo_texture) : nullptr;
+		if (tex) {
+			tex = tex->get_ptr();
+		}
+		if (tex) {
+			glEnable(GL_TEXTURE_2D);
+			glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+			glBindTexture(GL_TEXTURE_2D, tex->tex_id);
+		} else {
+			glDisable(GL_TEXTURE_2D);
+		}
+
+		RasterizerStorageGLFF::Shader::BillboardMode billboard = shader ? shader->billboard_mode : RasterizerStorageGLFF::Shader::BILLBOARD_DISABLED;
+
+		int visible = (mm->visible_instances >= 0) ? MIN(mm->visible_instances, mm->instance_count) : mm->instance_count;
+		int stride = mm->stride();
+		const float *data = mm->data.ptr();
+		Vector3 cam_x = p_cam_transform.basis.get_axis(0).normalized();
+		Vector3 cam_y = p_cam_transform.basis.get_axis(1).normalized();
+		Vector3 cam_z = p_cam_transform.basis.get_axis(2).normalized();
+
+		for (int p = 0; p < visible; p++) {
+			const float *d = data + p * stride;
+			if (d[0] == 0 && d[1] == 0 && d[2] == 0 && d[4] == 0 && d[5] == 0 && d[6] == 0 && d[8] == 0 && d[9] == 0 && d[10] == 0) {
+				continue; // real, zeroed inactive-slot marker (CPUParticles's own convention)
+			}
+
+			Basis inst_basis;
+			inst_basis.elements[0] = Vector3(d[0], d[1], d[2]);
+			inst_basis.elements[1] = Vector3(d[4], d[5], d[6]);
+			inst_basis.elements[2] = Vector3(d[8], d[9], d[10]);
+			Vector3 inst_origin(d[3], d[7], d[11]);
+
+			Transform world_xform = instance->transform * Transform(inst_basis, inst_origin);
+
+			switch (billboard) {
+				case RasterizerStorageGLFF::Shader::BILLBOARD_ENABLED: {
+					// GLSL: MODELVIEW_MATRIX = INV_CAMERA_MATRIX * mat4(CAMERA_MATRIX[0],CAMERA_MATRIX[1],CAMERA_MATRIX[2],WORLD_MATRIX[3]);
+					// i.e. full billboard: copy the camera's own world basis outright, keep the real world origin.
+					world_xform.basis = p_cam_transform.basis;
+				} break;
+				case RasterizerStorageGLFF::Shader::BILLBOARD_FIXED_Y: {
+					// GLSL: right = normalize(cross(vec3(0,1,0), CAMERA_MATRIX[2].xyz)); fwd = normalize(cross(CAMERA_MATRIX[0].xyz, vec3(0,1,0))); Y fixed.
+					// NOTE: Basis's own 3-Vector3 constructor takes ROWS, not columns (confirmed
+					// via core/math/basis.h) -- built via set_axis() (confirmed COLUMN-setter)
+					// instead, to avoid silently building the transpose of the intended basis.
+					Vector3 up(0, 1, 0);
+					Vector3 right = up.cross(cam_z).normalized();
+					Vector3 fwd = cam_x.cross(up).normalized();
+					Basis fixed_y_basis;
+					fixed_y_basis.set_axis(0, right);
+					fixed_y_basis.set_axis(1, up);
+					fixed_y_basis.set_axis(2, fwd);
+					world_xform.basis = fixed_y_basis;
+				} break;
+				case RasterizerStorageGLFF::Shader::BILLBOARD_PARTICLES: {
+					// GLSL: mat_world's basis columns = camera's own X/Y/Z axes, X&Y scaled by
+					// length(WORLD_MATRIX[0]), Z scaled by length(WORLD_MATRIX[2]); then rotated
+					// around the resulting local Z by INSTANCE_CUSTOM.x (the per-particle angle).
+					// Same set_axis()-based construction as BILLBOARD_FIXED_Y above, same reason.
+					float scale_xy = world_xform.basis.get_axis(0).length();
+					float scale_z = world_xform.basis.get_axis(2).length();
+					Basis b;
+					b.set_axis(0, cam_x * scale_xy);
+					b.set_axis(1, cam_y * scale_xy);
+					b.set_axis(2, cam_z * scale_z);
+					float angle = (mm->custom_data_floats > 0) ? d[stride - mm->custom_data_floats] : 0.0f;
+					world_xform.basis = b.rotated(cam_z, angle);
+				} break;
+				default:
+					break;
+			}
+
+			glPushMatrix();
+			GLfloat gl_model[16];
+			_load_transform_gl(world_xform, gl_model);
+			glMultMatrixf(gl_model);
+
+			Color inst_color = albedo;
+			if (mm->color_floats > 0) {
+				const float *cd = d + mm->xform_floats;
+				Color pc;
+				if (mm->color_format == VS::MULTIMESH_COLOR_8BIT) {
+					const uint8_t *c8 = (const uint8_t *)cd;
+					pc = Color(c8[0] / 255.0f, c8[1] / 255.0f, c8[2] / 255.0f, c8[3] / 255.0f);
+				} else {
+					pc = Color(cd[0], cd[1], cd[2], cd[3]);
+				}
+				inst_color = Color(albedo.r * pc.r, albedo.g * pc.g, albedo.b * pc.b, albedo.a * pc.a);
+			}
+			GLfloat mat_diffuse[4] = { inst_color.r, inst_color.g, inst_color.b, inst_color.a };
+			glColor4f(inst_color.r, inst_color.g, inst_color.b, inst_color.a);
+			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
+			glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
+
+			if (inst_color.a < 0.999f) {
+				glEnable(GL_BLEND);
+				glBlendEquation(GL_FUNC_ADD);
+				glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+			} else {
+				glDisable(GL_BLEND);
+			}
+
+			for (int s = 0; s < mesh->surfaces.size(); s++) {
+				RasterizerStorageGLFF::Surface *surface = mesh->surfaces[s];
+				if (surface->vertex_count == 0) {
+					continue;
+				}
+
+				glEnableClientState(GL_VERTEX_ARRAY);
+				PoolVector<Vector3>::Read vr = surface->vertices.read();
+				glVertexPointer(3, GL_FLOAT, 0, vr.ptr());
+
+				PoolVector<Vector3>::Read nr;
+				if (surface->has_normals) {
+					nr = surface->normals.read();
+					glEnableClientState(GL_NORMAL_ARRAY);
+					glNormalPointer(GL_FLOAT, 0, nr.ptr());
+				} else {
+					glDisableClientState(GL_NORMAL_ARRAY);
+				}
+
+				PoolVector<Vector2>::Read ur;
+				if (tex && surface->has_uvs) {
+					_set_tex_matrix_scale(tex);
+					ur = surface->uvs.read();
+					glEnableClientState(GL_TEXTURE_COORD_ARRAY);
+					glTexCoordPointer(2, GL_FLOAT, 0, ur.ptr());
+				} else {
+					glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+				}
+				glDisableClientState(GL_COLOR_ARRAY);
+
+				GLenum gl_primitive = _primitive_to_gl(surface->primitive);
+				if (surface->index_count > 0) {
+					GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+					PoolVector<uint8_t>::Read ir = surface->index_array.read();
+					glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
+				} else {
+					glDrawArrays(gl_primitive, 0, surface->vertex_count);
+				}
+			}
+
+			glPopMatrix();
+		}
+	}
+	glDisable(GL_BLEND);
+	_set_tex_matrix_scale(nullptr);
+}
+
 // Phase 3 (godot-ports#14 proposal): real mesh/material rendering, walking
 // p_cull_result instead of Phase 1's hardcoded test triangle. Scope
 // deliberately excludes (see rasterizer_storage_glff.h's Surface/Material
@@ -1355,6 +1579,16 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 
 				GLenum gl_primitive = _primitive_to_gl(surface->primitive);
 
+				// godot-ports#45: real point-primitive size. A real, core
+				// GL 1.0 fixed-function state -- GL_POINTS geometry (e.g.
+				// editor gizmo handle markers) is inherently always
+				// screen-facing already, no billboard trick needed, but
+				// was rendering at OpenGL's own default (1px) since
+				// nothing here ever called glPointSize() before now.
+				if (surface->primitive == VS::PRIMITIVE_POINTS) {
+					glPointSize((mat && !mat->ff_active) ? MAX(1.0f, mat->point_size) : 1.0f);
+				}
+
 				if (surface->index_count > 0) {
 					GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
 					PoolVector<uint8_t>::Read ir = surface->index_array.read();
@@ -1363,7 +1597,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					glDrawArrays(gl_primitive, 0, surface->vertex_count);
 				}
 
-				// godot-ports#23: baked lightmap modulation, a second draw
+	// godot-ports#23: baked lightmap modulation, a second draw
 				// pass over the SAME geometry (not a single-pass multitexture
 				// combine, per godot-ports#16's design -- strict GL 1.2 can't
 				// assume GL_ARB_multitexture, but a second pass works on any
@@ -1512,6 +1746,14 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 			}
 		}
 	}
+
+	// godot-ports#45: real per-instance MultiMesh (CPUParticles/CPUParticles3D)
+	// rendering, including the CPU-computed billboard-matrix substitute --
+	// see _render_multimesh_instances()'s own header comment above for the
+	// full account. Placed alongside the main opaque/on-top passes (same
+	// ambient/ambient-restore state already active), before the shadow and
+	// glow passes so particles are visible in a glow capture too.
+	_render_multimesh_instances(storage, p_cam_transform, p_cull_result, p_cull_count, max_lights);
 
 	// godot-ports#26: real stencil-shadow-volume pass + additive relight
 	// for the one primary shadow-casting DirectionalLight, if any. Must
