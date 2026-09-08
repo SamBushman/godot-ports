@@ -564,47 +564,136 @@ void RasterizerSceneGLFF::_draw_glow(float p_intensity) {
 // fixed this pass (z-fail avoids it but isn't a small change on this
 // hardware); acceptable for the scoped single-primary-light/simple-content
 // case this issue targets.
-static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, Vector<Vector3> &r_triangles) {
+// godot-ports#26 perf fix: builds (once, cached on the Surface -- see
+// RasterizerStorageGLFF::Surface::shadow_tri_indices/shadow_edges) the
+// mesh-topology-only edge adjacency this function used to rebuild from
+// scratch every single call. Purely a function of vertex/index data, never
+// the light direction, so it's safe to share across every instance/every
+// frame that uses this surface until the underlying data changes
+// (invalidated in _decode_surface_arrays()).
+static void _build_shadow_topology_if_needed(RasterizerStorageGLFF::Surface *p_surface) {
+	if (p_surface->shadow_topology_built) {
+		return;
+	}
+	p_surface->shadow_topology_built = true;
+	p_surface->shadow_tri_indices.clear();
+	p_surface->shadow_edges.clear();
+	p_surface->shadow_tri_edges.clear();
+
 	if (p_surface->primitive != VS::PRIMITIVE_TRIANGLES || p_surface->index_count < 3 || p_surface->vertex_count == 0) {
 		return;
 	}
 
 	int tri_count = p_surface->index_count / 3;
-	PoolVector<Vector3>::Read vr = p_surface->vertices.read();
 	PoolVector<uint8_t>::Read ir = p_surface->index_array.read();
 	bool use_32 = p_surface->vertex_count >= (1 << 16);
 	const uint16_t *idx16 = use_32 ? nullptr : (const uint16_t *)ir.ptr();
 	const uint32_t *idx32 = use_32 ? (const uint32_t *)ir.ptr() : nullptr;
 
-	Vector<int> tri_idx;
-	tri_idx.resize(tri_count * 3);
-	Vector<bool> faces_light;
-	faces_light.resize(tri_count);
-
+	p_surface->shadow_tri_indices.resize(tri_count * 3);
 	for (int t = 0; t < tri_count; t++) {
-		int i0 = use_32 ? (int)idx32[t * 3 + 0] : (int)idx16[t * 3 + 0];
-		int i1 = use_32 ? (int)idx32[t * 3 + 1] : (int)idx16[t * 3 + 1];
-		int i2 = use_32 ? (int)idx32[t * 3 + 2] : (int)idx16[t * 3 + 2];
-		tri_idx.write[t * 3 + 0] = i0;
-		tri_idx.write[t * 3 + 1] = i1;
-		tri_idx.write[t * 3 + 2] = i2;
-		Vector3 v0 = vr[i0], v1 = vr[i1], v2 = vr[i2];
-		Vector3 n = (v1 - v0).cross(v2 - v0); // not normalized -- only the dot's sign matters
-		faces_light.write[t] = n.dot(p_light_dir_objspace) > 0.0f;
+		p_surface->shadow_tri_indices.write[t * 3 + 0] = use_32 ? (int)idx32[t * 3 + 0] : (int)idx16[t * 3 + 0];
+		p_surface->shadow_tri_indices.write[t * 3 + 1] = use_32 ? (int)idx32[t * 3 + 1] : (int)idx16[t * 3 + 1];
+		p_surface->shadow_tri_indices.write[t * 3 + 2] = use_32 ? (int)idx32[t * 3 + 2] : (int)idx16[t * 3 + 2];
 	}
 
-	// Canonical edge key: pack two (unordered) vertex indices into one
-	// 64-bit key. Real vertex counts in this backend's own decoded
-	// surfaces are always far under 2^32 (a PoolVector<Vector3> itself
-	// would need to be enormous first), so this never collides.
-	Map<uint64_t, Vector<int>> edge_to_tris;
+	// godot-ports#26 bugfix: real meshes (Godot's own CubeMesh, any glTF
+	// export like this project's mob.glb/player.glb) duplicate vertices at
+	// every hard edge/UV seam so each face can carry its own normal/UV --
+	// e.g. a cube has 24 vertex-buffer entries for 8 geometric corners,
+	// never sharing an index across faces. Keying silhouette-edge
+	// adjacency off raw vertex INDEX (as this used to) therefore can never
+	// recognize a shared edge between two faces at all -- every hard edge
+	// misreads as a mesh boundary regardless of true adjacency, producing
+	// a wildly over-extruded, self-intersecting shadow volume. Its net
+	// stencil count then depends sensitively on exact orientation: fixed
+	// (if wrong) for a static caster, so no visible symptom -- but as the
+	// caster rotates (this project's own idle-bob AnimationPlayer, used by
+	// both Player and every Mob) which triangles are light-facing keeps
+	// changing, so the (wrong) volume's silhouette shape and net count
+	// keep changing too, producing genuine per-frame stencil-count
+	// instability -- confirmed via a minimal isolated repro (a plain
+	// rotating CubeMesh box): motionless, no flicker; rotating, flickers
+	// heavily. Fix: weld vertices by POSITION (quantized, since real
+	// duplicate-for-normals/UVs vertices share bit-identical or
+	// near-identical positions) before computing edge keys, so two
+	// duplicate-but-coincident vertices across a real hard edge resolve to
+	// the same welded id and the adjacency test sees the true topology.
+	PoolVector<Vector3>::Read weld_vr = p_surface->vertices.read();
+	Map<uint64_t, int> pos_to_welded;
+	Vector<int> welded_id;
+	welded_id.resize(p_surface->vertex_count);
+	for (int v = 0; v < p_surface->vertex_count; v++) {
+		const Vector3 &p = weld_vr[v];
+		int64_t xi = (int64_t)Math::round((double)p.x * 4096.0);
+		int64_t yi = (int64_t)Math::round((double)p.y * 4096.0);
+		int64_t zi = (int64_t)Math::round((double)p.z * 4096.0);
+		uint64_t h = 1469598103934665603ULL; // FNV-1a offset basis
+		h = (h ^ (uint64_t)xi) * 1099511628211ULL;
+		h = (h ^ (uint64_t)yi) * 1099511628211ULL;
+		h = (h ^ (uint64_t)zi) * 1099511628211ULL;
+		Map<uint64_t, int>::Element *WE = pos_to_welded.find(h);
+		if (WE) {
+			welded_id.write[v] = WE->value();
+		} else {
+			int new_id = pos_to_welded.size();
+			pos_to_welded[h] = new_id;
+			welded_id.write[v] = new_id;
+		}
+	}
+
+	// Canonical edge key: pack two (unordered) WELDED vertex ids into one
+	// 64-bit key -- real welded-id counts are always far under 2^32, so
+	// this never collides. Only used here, once, at build time --
+	// shadow_tri_edges below is what lets the per-frame pass skip
+	// re-keying/re-searching entirely.
+	Map<uint64_t, int> key_to_edge;
+	p_surface->shadow_tri_edges.resize(tri_count * 3);
 	for (int t = 0; t < tri_count; t++) {
 		for (int e = 0; e < 3; e++) {
-			int a = tri_idx[t * 3 + e];
-			int b = tri_idx[t * 3 + (e + 1) % 3];
-			uint64_t key = ((uint64_t)MIN(a, b) << 32) | (uint32_t)MAX(a, b);
-			edge_to_tris[key].push_back(t);
+			int a = p_surface->shadow_tri_indices[t * 3 + e];
+			int b = p_surface->shadow_tri_indices[t * 3 + (e + 1) % 3];
+			int wa = welded_id[a];
+			int wb = welded_id[b];
+			uint64_t key = ((uint64_t)MIN(wa, wb) << 32) | (uint32_t)MAX(wa, wb);
+			Map<uint64_t, int>::Element *E = key_to_edge.find(key);
+			int edge_idx;
+			if (E) {
+				edge_idx = E->value();
+			} else {
+				edge_idx = p_surface->shadow_edges.size();
+				RasterizerStorageGLFF::Surface::ShadowEdge se;
+				se.va = a;
+				se.vb = b;
+				p_surface->shadow_edges.push_back(se);
+				key_to_edge[key] = edge_idx;
+			}
+			p_surface->shadow_edges.write[edge_idx].owner_tris.push_back(t);
+			p_surface->shadow_tri_edges.write[t * 3 + e] = edge_idx;
 		}
+	}
+}
+
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, Vector<Vector3> &r_triangles) {
+	_build_shadow_topology_if_needed(p_surface);
+	int tri_count = p_surface->shadow_tri_indices.size() / 3;
+	if (tri_count == 0) {
+		return;
+	}
+
+	PoolVector<Vector3>::Read vr = p_surface->vertices.read();
+	const int *tri_idx = p_surface->shadow_tri_indices.ptr();
+
+	// Only this part is genuinely per-frame/light-dependent: which
+	// triangles currently face the light. The edge adjacency itself
+	// (p_surface->shadow_edges) was already built (or reused from the
+	// cache) above.
+	Vector<bool> faces_light;
+	faces_light.resize(tri_count);
+	for (int t = 0; t < tri_count; t++) {
+		Vector3 v0 = vr[tri_idx[t * 3 + 0]], v1 = vr[tri_idx[t * 3 + 1]], v2 = vr[tri_idx[t * 3 + 2]];
+		Vector3 n = (v1 - v0).cross(v2 - v0); // not normalized -- only the dot's sign matters
+		faces_light.write[t] = n.dot(p_light_dir_objspace) > 0.0f;
 	}
 
 	Vector3 extrude = -p_light_dir_objspace.normalized() * p_extrude_distance;
@@ -630,8 +719,11 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 		for (int e = 0; e < 3; e++) {
 			int a = vi[e];
 			int b = vi[(e + 1) % 3];
-			uint64_t key = ((uint64_t)MIN(a, b) << 32) | (uint32_t)MAX(a, b);
-			const Vector<int> &owners = edge_to_tris[key];
+			// shadow_tri_edges[t*3+e] was already resolved once, at
+			// topology-build time, to this exact edge's index -- no
+			// per-frame re-keying or searching needed.
+			const RasterizerStorageGLFF::Surface::ShadowEdge &edge = p_surface->shadow_edges[p_surface->shadow_tri_edges[t * 3 + e]];
+			const Vector<int> &owners = edge.owner_tris;
 			bool is_silhouette = false;
 			if (owners.size() <= 1) {
 				is_silhouette = true; // boundary edge on a light-facing triangle
@@ -681,13 +773,34 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	glDisableClientState(GL_NORMAL_ARRAY);
 	glEnableClientState(GL_VERTEX_ARRAY);
 
-	glClear(GL_STENCIL_BUFFER_BIT);
+	// Stencil is now cleared once, up front, alongside the frame's main
+	// color+depth clear (see render_scene()'s own comment on this) --
+	// not re-cleared here.
 	glEnable(GL_STENCIL_TEST);
 	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
 	glDepthMask(GL_FALSE);
 	glEnable(GL_DEPTH_TEST);
 	glDepthFunc(GL_LESS);
 	glStencilFunc(GL_ALWAYS, 0, 0xFF);
+
+	// Self-shadow z-fighting fix: a shadow volume's own front cap is built
+	// directly from the caster's light-facing triangles (see
+	// _build_shadow_volume_triangles()), so for any caster whose own
+	// surface faces the light -- which for a flat receiver like a ground
+	// plane (a default SHADOW_CASTING_SETTING_ON GeometryInstance, same as
+	// everything else) means its own visible top surface -- the cap is
+	// EXACTLY coincident with geometry the opaque base pass already wrote
+	// into the depth buffer. Testing that cap with GL_LESS against its own
+	// identical depth is a coin flip decided by FP rounding, which differs
+	// frame to frame as the camera moves -- exactly the "ground flickers
+	// like a light switching on/off" symptom, since the ground is most of
+	// the screen. A small constant polygon offset pushes the cap's tested
+	// depth reliably farther than the real surface, so the coincident case
+	// deterministically resolves to "not in front of itself" (the
+	// physically sane answer -- a single-layer surface cannot occlude
+	// itself) instead of flickering.
+	glEnable(GL_POLYGON_OFFSET_FILL);
+	glPolygonOffset(1.0f, 4.0f);
 
 	Vector<Vector3> vol_tris;
 	for (int i = 0; i < p_cull_count; i++) {
@@ -734,23 +847,44 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		glPopMatrix();
 	}
 
+	glDisable(GL_POLYGON_OFFSET_FILL);
+
 	// Additive relight: only this one light, only where the stencil buffer
 	// is still exactly 0 (never net-entered a shadow volume), only onto
 	// fragments that already exist at this exact depth (the opaque pass's
-	// own fragments -- GL_EQUAL, matching the same masking trick already
-	// used by the baked-lightmap pass above).
+	// own fragments).
+	//
+	// godot-ports#26 flicker fix: this used to be glDepthFunc(GL_EQUAL),
+	// requiring this redraw's fragment depth to bit-exactly match what the
+	// base pass wrote. Confirmed via instrumentation that the CPU-side
+	// state driving this pass (which light, which casters, frame timing)
+	// is 100% stable frame to frame -- so the visible flicker has to be
+	// happening at the GL rasterization level, and GL_EQUAL depth matching
+	// across two separate draw calls is exactly the kind of thing that
+	// isn't guaranteed bit-exact on real hardware, especially with
+	// different GL state active in between (GL_LIGHTING/GL_TEXTURE_2D
+	// toggled off for the stencil-build sub-pass, back on here) on an old,
+	// quirky driver (see `ati-x1900-driver-quirks` for the sibling GPU's
+	// own catalog of similar precision surprises -- RV250 is a different
+	// chip, not yet cataloged, but the category of bug is the same
+	// class). Fix: GL_LEQUAL (this codebase's own established pattern
+	// elsewhere for "redraw this surface again without z-fighting", see
+	// the two GL_LEQUAL restores after this file's other GL_EQUAL-gated
+	// sub-passes) plus a small camera-ward polygon-offset bias, so the
+	// redraw's depth is reliably <= the stored depth regardless of FP
+	// noise -- deterministic instead of a per-pixel coin flip.
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	glStencilFunc(GL_EQUAL, 0, 0xFF);
 	glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-	glDepthFunc(GL_EQUAL);
+	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_FALSE);
+	glEnable(GL_POLYGON_OFFSET_FILL);
+	glPolygonOffset(-1.0f, -4.0f);
 	glEnable(GL_LIGHTING);
 	glEnable(p_gl_light);
 	glEnable(GL_BLEND);
 	glBlendEquation(GL_FUNC_ADD);
 	glBlendFunc(GL_ONE, GL_ONE);
-	glEnable(GL_CULL_FACE);
-	glCullFace(GL_BACK);
 
 	GLfloat zero_amb[4] = { 0, 0, 0, 1 };
 	glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero_amb); // ambient already accounted for in the base pass
@@ -781,6 +915,36 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 				continue; // matches the base pass's own pass==0/!surface_unshaded gating
 			}
 
+			// godot-ports#26 bugfix: this pass used to hardcode
+			// glCullFace(GL_BACK) for every surface regardless of its real
+			// cull_mode, while the base pass (further down in this same
+			// function) correctly honors each material's own setting. For
+			// any double-sided surface (cull_mode == GLFF_CULL_DISABLED --
+			// e.g. every material in this project's own mob.glb/player.glb,
+			// confirmed via their glTF source: all `"doubleSided":true`),
+			// this meant a real, camera/rotation-dependent subset of the
+			// base pass's own visible fragments (whichever triangles are
+			// currently back-facing on a double-sided mesh) got silently
+			// skipped here -- present in the base pass, absent from the
+			// relight pass -- so those fragments permanently lost the
+			// primary light's contribution for however long that triangle
+			// stayed back-facing. As an animated/rotating character (the
+			// idle float/bob AnimationPlayer both Player and Mob use)
+			// slowly turns, which triangles are back-facing keeps changing,
+			// which reads as exactly the reported symptom: the moving
+			// characters flickering in brightness while the static,
+			// single-sided Ground does not.
+			RasterizerStorageGLFF::GLFFCullMode effective_cull_mode = (mat && mat->ff_active) ? mat->ff_cull_mode : (shader ? shader->cull_mode : RasterizerStorageGLFF::GLFF_CULL_BACK);
+			if (effective_cull_mode == RasterizerStorageGLFF::GLFF_CULL_FRONT) {
+				glEnable(GL_CULL_FACE);
+				glCullFace(GL_FRONT);
+			} else if (effective_cull_mode == RasterizerStorageGLFF::GLFF_CULL_DISABLED) {
+				glDisable(GL_CULL_FACE);
+			} else {
+				glEnable(GL_CULL_FACE);
+				glCullFace(GL_BACK);
+			}
+
 			if (!matrix_pushed) {
 				glPushMatrix();
 				GLfloat gl_model[16];
@@ -793,6 +957,55 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, 1.0f };
 			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
 			glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
+			// godot-ports#26 bugfix: GL_SPECULAR/GL_SHININESS were never
+			// reset per-surface here (only DIFFUSE/AMBIENT were), so this
+			// pass silently inherited whatever the BASE pass's own
+			// specular approximation (godot-ports#24) last left active --
+			// typically a real, non-zero material specular color paired
+			// with GL_SHININESS 0, which fixed-function lighting renders
+			// as a huge, angle-independent specular term. WHICH instance's
+			// specular state survived depended entirely on which instance
+			// the base pass happened to draw LAST, which in turn depends
+			// on p_cull_result's order -- confirmed via instrumentation
+			// that Godot's own culling/octree genuinely reorders that
+			// array whenever any instance's transform changes (not just
+			// the specific instance that moved). So the leaked value
+			// could flip between frames purely from something in the
+			// scene moving, uniformly over-brightening every surface this
+			// pass relights at once -- exactly the reported whole-scene
+			// brightness flicker, and why it tracked animation/movement
+			// rather than any single object's own state. This pass has
+			// never attempted to replicate the base pass's specular
+			// approximation for the relit light (out of scope, not a
+			// deliberate omission being restored) -- zero it explicitly,
+			// the same way DIFFUSE/AMBIENT already are, so every draw
+			// here is fully self-contained regardless of draw order.
+			GLfloat zero_specular[4] = { 0, 0, 0, 1 };
+			glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero_specular);
+			glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+			// Same leak, same fix, for GL_EMISSION -- the base pass's own
+			// godot-ports#24 comment on this exact call already flags it
+			// as "sticky material state that would otherwise leak into a
+			// following surface," but that discipline was only applied
+			// there, never mirrored here.
+			GLfloat zero_emission[4] = { 0, 0, 0, 1 };
+			glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero_emission);
+			// Same leak, same fix, for GL_COLOR_MATERIAL: any surface
+			// using FLAG_ALBEDO_FROM_VERTEX_COLOR (common on imported
+			// glTF meshes like this project's own mob.glb/player.glb)
+			// enables GL_COLOR_MATERIAL(GL_AMBIENT_AND_DIFFUSE) in the
+			// base pass. If that's still enabled here, it makes OpenGL
+			// track ambient+diffuse from the "current color" instead of
+			// the explicit glMaterialfv() calls just above, silently
+			// overriding them with whatever color happened to be active
+			// -- worse, this backend's asset-dependent (only triggers on
+			// vertex-colored meshes, absent from a plain CubeMesh repro).
+			// GL_ALPHA_TEST has the identical latent-leak shape (base
+			// pass enables/disables it per-surface, relight never
+			// touches it) -- fixed alongside for the same reason, even
+			// without a confirmed repro for it specifically.
+			glDisable(GL_COLOR_MATERIAL);
+			glDisable(GL_ALPHA_TEST);
 
 			PoolVector<Vector3>::Read vr = surface->vertices.read();
 			PoolVector<Vector3>::Read nr = surface->normals.read();
@@ -813,9 +1026,9 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			glPopMatrix();
 		}
 	}
-
 	glDisable(GL_STENCIL_TEST);
 	glDisable(p_gl_light);
+	glDisable(GL_POLYGON_OFFSET_FILL);
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_TRUE);
 	glDisable(GL_BLEND);
@@ -1081,11 +1294,26 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// by the editor's own camera, which has no Environment (godot-ports#28).
 	// Matches GLES2's identical precedence (rasterizer_scene_gles2.cpp,
 	// around its own "clear color" comment).
+	// godot-ports#26 bugfix: GL_STENCIL_BUFFER_BIT is folded into this
+	// same top-of-frame clear (was a separate, later glClear(GL_STENCIL_
+	// BUFFER_BIT) call inside _render_primary_shadow_and_relight()).
+	// Confirmed via a minimal isolated repro (a single-mesh scene,
+	// stepped one discrete transform change at a time) that the visible
+	// per-object brightness was toggling between two states on EVERY
+	// distinct transform-change event regardless of the actual resulting
+	// orientation -- e.g. resetting to the exact same zero rotation twice
+	// in a row still flipped the visible state each time -- which rules
+	// out anything keyed off geometry/orientation and points at a
+	// stateful clear/buffer issue instead. A stencil-only glClear issued
+	// well after, and separately from, the frame's main color+depth
+	// clear is exactly the kind of thing that isn't guaranteed to behave
+	// consistently on an old driver -- folding it into one combined
+	// clear at the top of the frame removes that separation entirely.
 	if (env && (env->bg_mode == VS::ENV_BG_COLOR || env->bg_mode == VS::ENV_BG_CANVAS || env->bg_mode == VS::ENV_BG_COLOR_SKY)) {
 		glClearColor(env->bg_color.r, env->bg_color.g, env->bg_color.b, 1.0);
-		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+		glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 	} else {
-		glClear(GL_DEPTH_BUFFER_BIT);
+		glClear(GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
 	}
 
 	glEnable(GL_DEPTH_TEST);

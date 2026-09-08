@@ -382,6 +382,16 @@ void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
 	uint32_t p_format = surface->format;
 	int p_vertex_count = surface->vertex_count;
 
+	// godot-ports#26 perf fix: vertex/index data (and therefore mesh
+	// topology) may be changing here -- drop the cached shadow-volume
+	// edge-adjacency (see _build_shadow_volume_triangles() in
+	// rasterizer_scene_glff.cpp) so it gets rebuilt from the new data
+	// on next use instead of silently reusing stale topology.
+	surface->shadow_topology_built = false;
+	surface->shadow_tri_indices.clear();
+	surface->shadow_edges.clear();
+	surface->shadow_tri_edges.clear();
+
 	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
 	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;
 	surface->has_uvs = (p_format & VS::ARRAY_FORMAT_TEX_UV) != 0;

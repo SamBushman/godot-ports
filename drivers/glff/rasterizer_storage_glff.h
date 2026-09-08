@@ -642,6 +642,26 @@ public:
 		bool has_colors = false;
 		bool has_uvs = false;
 		bool has_uv2 = false;
+
+		// godot-ports#26 perf fix: mesh-topology-only (light-independent)
+		// silhouette-edge adjacency, built once per surface and reused by
+		// every instance/every frame that casts a shadow with this surface,
+		// instead of being rebuilt from scratch (a fresh Map<uint64_t,
+		// Vector<int>> plus heap-allocated owner lists) every single frame
+		// for every shadow-casting instance -- see
+		// _build_shadow_volume_triangles() in rasterizer_scene_glff.cpp.
+		// Only the per-triangle light-facing test still has to happen every
+		// frame (it genuinely depends on the light direction); the edge
+		// adjacency itself never changes unless the underlying vertex/index
+		// data does (invalidated in _decode_surface_arrays()).
+		struct ShadowEdge {
+			int va, vb;
+			Vector<int> owner_tris;
+		};
+		Vector<int> shadow_tri_indices; // flattened, tri_count * 3
+		Vector<ShadowEdge> shadow_edges;
+		Vector<int> shadow_tri_edges; // flattened, tri_count * 3 -- shadow_tri_edges[t*3+e] indexes shadow_edges for triangle t's e'th edge, so the per-frame pass never has to re-key/re-search
+		bool shadow_topology_built = false;
 	};
 
 	struct Mesh : public RID_Data {
