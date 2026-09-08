@@ -755,6 +755,28 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 	}
 }
 
+// godot-ports#26 perf fix: per-instance cache of a fully-built shadow
+// volume (see its use in _render_primary_shadow_and_relight() below for the
+// full reasoning). Keyed by the instance pointer -- stable/persistent for a
+// given logical node across frames, but not tied to that node's lifetime,
+// so entries for since-destroyed instances would otherwise accumulate
+// forever over a long play session (e.g. this project's own Squash the
+// Creeps, which spawns a new Mob every 0.5s indefinitely). Pruned by a
+// simple size cap rather than real lifecycle tracking (which would need a
+// destroy hook this cull-result-only code path doesn't have): once the
+// cache holds more entries than a single frame plausibly needs, it's
+// cheaper and simpler to drop the whole thing and let it repopulate from
+// scratch (a one-frame cost) than to chase down which entries are actually
+// stale.
+struct ShadowVolumeCacheEntry {
+	Transform transform;
+	Vector3 light_dir_objspace;
+	RasterizerStorageGLFF::Mesh *mesh = nullptr;
+	Vector<Vector3> vol_tris;
+};
+static Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry> shadow_volume_cache;
+static const int SHADOW_VOLUME_CACHE_MAX_ENTRIES = 256;
+
 // The stencil-volume + additive-relight frame pass. Called once per frame
 // (not per-instance) from render_scene(), AFTER the normal opaque pass has
 // already populated the real color+depth buffers -- the shadow volumes'
@@ -763,8 +785,96 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 // hitting real geometry. p_light_dir_world is GL's own light-position
 // convention already used elsewhere in this file: the direction FROM a
 // surface TOWARD the light, not the direction the light travels.
-static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count) {
+static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, const Transform &p_cam_transform, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count) {
+	if (shadow_volume_cache.size() > SHADOW_VOLUME_CACHE_MAX_ENTRIES) {
+		shadow_volume_cache.clear();
+	}
 	static const float SHADOW_EXTRUDE_DISTANCE = 200.0f;
+
+	// godot-ports#26 perf fix: shadow-caster budget. The per-instance
+	// volume cache above only pays off for casters that stay still --
+	// real content (this project's own Squash the Creeps) can have every
+	// single shadow-casting instance animating every frame (Player and
+	// every Mob share a continuous idle-bob AnimationPlayer), so caching
+	// alone doesn't bound the cost as caster count grows over a long
+	// session (MobTimer spawns a new one every 0.5s, indefinitely, with
+	// nothing despawning them but leaving the screen or being squashed).
+	// Cap the real silhouette-extraction + stencil-draw work to the
+	// MAX_DISTANCE_CASTERS instances closest to the camera -- a reasonable
+	// proxy for "large enough on screen for its shadow to actually read
+	// as one," since a shadow from something far away/small on screen is
+	// the least likely to be missed. Selection is a bounded O(p_cull_count
+	// * MAX_DISTANCE_CASTERS) partial selection (track the current worst
+	// of the kept set, replace it when something closer turns up) rather
+	// than a full sort, since the budget is small and fixed regardless of
+	// how many total casters exist. Instances beyond the budget simply
+	// don't cast a shadow this frame -- they're still fully relit and
+	// still correctly receive shadows cast by the instances that made the
+	// cut, only their own casting is skipped, the same real trade-off
+	// "max shadow casters" budgets make in modern engines.
+	//
+	// PRIORITY_SHADOW_LAYER_BIT is a separate, unconditional guarantee on
+	// top of that distance budget: an instance with this bit set in its
+	// layer_mask (VisualInstance's existing, already-editor-exposed
+	// `layers` property -- no new engine API needed) always casts a
+	// shadow this frame regardless of distance to camera. Exists because
+	// distance-to-camera is only a proxy for "will be missed if it
+	// doesn't cast a shadow" -- it breaks down for a specific, important
+	// case this project's own camera setup hits directly: Main.tscn's
+	// Camera is a fixed Position3D rig, not something that follows the
+	// Player, so the Player can end up farther from the camera than a
+	// cluster of Mobs converging on it and lose its budget slot to them
+	// even though the Player losing its own shadow is far more
+	// noticeable than any one Mob losing its. Content opts a specific
+	// instance into this guarantee by setting the bit itself (e.g.
+	// Player.gd could call set_layer_mask_bit(31, true) in _ready()) --
+	// this file only defines which bit means "always cast," it doesn't
+	// decide who gets it.
+	static const uint32_t PRIORITY_SHADOW_LAYER_BIT = 1u << 31;
+	static const int MAX_PRIORITY_CASTERS = 8;
+	static const int MAX_DISTANCE_CASTERS = 3;
+	int caster_idx[MAX_PRIORITY_CASTERS + MAX_DISTANCE_CASTERS];
+	float caster_dist_sq[MAX_DISTANCE_CASTERS];
+	int priority_count = 0;
+	int distance_count = 0;
+	for (int i = 0; i < p_cull_count; i++) {
+		RasterizerScene::InstanceBase *instance = p_cull_result[i];
+		if (!instance->visible || instance->base_type != VS::INSTANCE_MESH) {
+			continue;
+		}
+		if (instance->cast_shadows == VS::SHADOW_CASTING_SETTING_OFF) {
+			continue;
+		}
+		if ((instance->layer_mask & PRIORITY_SHADOW_LAYER_BIT) && priority_count < MAX_PRIORITY_CASTERS) {
+			caster_idx[priority_count] = i;
+			priority_count++;
+			continue;
+		}
+		float dist_sq = instance->transform.origin.distance_squared_to(p_cam_transform.origin);
+		if (distance_count < MAX_DISTANCE_CASTERS) {
+			caster_idx[MAX_PRIORITY_CASTERS + distance_count] = i;
+			caster_dist_sq[distance_count] = dist_sq;
+			distance_count++;
+		} else {
+			int worst = 0;
+			for (int k = 1; k < MAX_DISTANCE_CASTERS; k++) {
+				if (caster_dist_sq[k] > caster_dist_sq[worst]) {
+					worst = k;
+				}
+			}
+			if (dist_sq < caster_dist_sq[worst]) {
+				caster_idx[MAX_PRIORITY_CASTERS + worst] = i;
+				caster_dist_sq[worst] = dist_sq;
+			}
+		}
+	}
+	// Compact the two ranges (priority casters at [0, priority_count),
+	// distance casters stored starting at a fixed offset) into one
+	// contiguous [0, caster_count) run the draw loop can walk plainly.
+	for (int k = 0; k < distance_count; k++) {
+		caster_idx[priority_count + k] = caster_idx[MAX_PRIORITY_CASTERS + k];
+	}
+	int caster_count = priority_count + distance_count;
 
 	glDisable(GL_LIGHTING);
 	glDisable(GL_TEXTURE_2D);
@@ -802,15 +912,8 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	glEnable(GL_POLYGON_OFFSET_FILL);
 	glPolygonOffset(1.0f, 4.0f);
 
-	Vector<Vector3> vol_tris;
-	for (int i = 0; i < p_cull_count; i++) {
-		RasterizerScene::InstanceBase *instance = p_cull_result[i];
-		if (!instance->visible || instance->base_type != VS::INSTANCE_MESH) {
-			continue;
-		}
-		if (instance->cast_shadows == VS::SHADOW_CASTING_SETTING_OFF) {
-			continue;
-		}
+	for (int ci = 0; ci < caster_count; ci++) {
+		RasterizerScene::InstanceBase *instance = p_cull_result[caster_idx[ci]];
 		RasterizerStorageGLFF::Mesh *mesh = p_storage->mesh_owner.getornull(instance->base);
 		if (!mesh) {
 			continue;
@@ -819,10 +922,42 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		Basis inv_rot = instance->transform.basis.orthonormalized().transposed();
 		Vector3 light_dir_objspace = inv_rot.xform(p_light_dir_world).normalized();
 
-		vol_tris.resize(0);
-		for (int s = 0; s < mesh->surfaces.size(); s++) {
-			_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, vol_tris);
+		// godot-ports#26 perf fix: the fully-built shadow volume (front
+		// cap + extruded silhouette walls + back cap, across all of this
+		// instance's surfaces) is cached per-instance and only rebuilt
+		// when something it actually depends on changes -- its own
+		// transform (world position/orientation), the mesh it's using,
+		// or the light direction in its own object space. For a caster
+		// that never moves (level geometry, a static Ground plane) this
+		// is every field, every frame, forever -- exactly the case that
+		// used to pay the full CPU-side silhouette-extraction cost (a
+		// per-triangle light-facing test plus a walk of every candidate
+		// silhouette edge) for literally zero change in output. Genuinely
+		// moving/rotating casters (this project's own Player/Mob, both
+		// using a continuous idle-bob AnimationPlayer) still rebuild
+		// every frame, same as before -- their transform really does
+		// change every frame, so the cache correctly never hits for them.
+		// Keyed by the instance pointer, which is stable/persistent for a
+		// given logical node across frames (VisualServerScene::Instance
+		// objects are created once and reused by culling, not recreated
+		// per frame) -- see the cache's own pruning comment further down
+		// for how a since-destroyed instance's stale entry gets cleared
+		// out rather than accumulating forever.
+		Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry>::Element *CE = shadow_volume_cache.find(instance);
+		bool cache_hit = CE && CE->value().mesh == mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace;
+		if (!CE) {
+			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
+		if (!cache_hit) {
+			CE->value().vol_tris.resize(0);
+			for (int s = 0; s < mesh->surfaces.size(); s++) {
+				_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, CE->value().vol_tris);
+			}
+			CE->value().mesh = mesh;
+			CE->value().transform = instance->transform;
+			CE->value().light_dir_objspace = light_dir_objspace;
+		}
+		const Vector<Vector3> &vol_tris = CE->value().vol_tris;
 		if (vol_tris.size() == 0) {
 			continue;
 		}
@@ -1991,7 +2126,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// scene, matching how it already sees the lightmap pass's own
 	// contribution from inside the loop above).
 	if (primary_light_casts_shadow) {
-		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cull_result, p_cull_count);
+		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cam_transform, p_cull_result, p_cull_count);
 	}
 
 	// godot-ports#31: capture+blur+blend the fully-composited opaque/
