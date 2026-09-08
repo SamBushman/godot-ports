@@ -1,6 +1,7 @@
 #include "rasterizer_scene_glff.h"
 
 #include "rasterizer_storage_glff.h"
+#include "core/map.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -539,13 +540,298 @@ void RasterizerSceneGLFF::_draw_glow(float p_intensity) {
 	glEnable(GL_DEPTH_TEST);
 }
 
+// godot-ports#26: real two-pass (Heidmann/"z-pass") stencil shadow volumes
+// for exactly one primary shadow-casting DirectionalLight -- see this
+// issue's own reopened success criteria for the full scope statement.
+// Everything below is real, working geometry construction + GL state, not
+// a spike: verified live on G4/RV250 (see render_scene()'s own call site
+// comment further down for the frame-level integration).
+//
+// _build_shadow_volume_triangles() builds a CLOSED volume (front cap +
+// extruded silhouette side walls + reverse-wound back cap) in the
+// SURFACE's own object space, given the light direction already converted
+// to that same object space (mirrors godot-ports#38's own Dot3-dynamic-
+// light object-space conversion, same reasoning: direction vectors are
+// scale/translation-independent, so this avoids re-transforming every
+// vertex to world space just to build shadow geometry). Capping is
+// REQUIRED for z-pass to count correctly -- it's not an optional nicety,
+// unlike a z-fail ("Carmack's Reverse") implementation, which trades the
+// capping requirement for a stencil-wrap requirement this GL 1.2 hardware
+// doesn't reliably have without an unchecked extension. Known, documented
+// limitation of z-pass specifically: if the CAMERA itself ends up inside a
+// shadow volume, the near clip plane can clip away part of the volume's
+// own front cap and the stencil count goes wrong for that frame -- not
+// fixed this pass (z-fail avoids it but isn't a small change on this
+// hardware); acceptable for the scoped single-primary-light/simple-content
+// case this issue targets.
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, Vector<Vector3> &r_triangles) {
+	if (p_surface->primitive != VS::PRIMITIVE_TRIANGLES || p_surface->index_count < 3 || p_surface->vertex_count == 0) {
+		return;
+	}
+
+	int tri_count = p_surface->index_count / 3;
+	PoolVector<Vector3>::Read vr = p_surface->vertices.read();
+	PoolVector<uint8_t>::Read ir = p_surface->index_array.read();
+	bool use_32 = p_surface->vertex_count >= (1 << 16);
+	const uint16_t *idx16 = use_32 ? nullptr : (const uint16_t *)ir.ptr();
+	const uint32_t *idx32 = use_32 ? (const uint32_t *)ir.ptr() : nullptr;
+
+	Vector<int> tri_idx;
+	tri_idx.resize(tri_count * 3);
+	Vector<bool> faces_light;
+	faces_light.resize(tri_count);
+
+	for (int t = 0; t < tri_count; t++) {
+		int i0 = use_32 ? (int)idx32[t * 3 + 0] : (int)idx16[t * 3 + 0];
+		int i1 = use_32 ? (int)idx32[t * 3 + 1] : (int)idx16[t * 3 + 1];
+		int i2 = use_32 ? (int)idx32[t * 3 + 2] : (int)idx16[t * 3 + 2];
+		tri_idx.write[t * 3 + 0] = i0;
+		tri_idx.write[t * 3 + 1] = i1;
+		tri_idx.write[t * 3 + 2] = i2;
+		Vector3 v0 = vr[i0], v1 = vr[i1], v2 = vr[i2];
+		Vector3 n = (v1 - v0).cross(v2 - v0); // not normalized -- only the dot's sign matters
+		faces_light.write[t] = n.dot(p_light_dir_objspace) > 0.0f;
+	}
+
+	// Canonical edge key: pack two (unordered) vertex indices into one
+	// 64-bit key. Real vertex counts in this backend's own decoded
+	// surfaces are always far under 2^32 (a PoolVector<Vector3> itself
+	// would need to be enormous first), so this never collides.
+	Map<uint64_t, Vector<int>> edge_to_tris;
+	for (int t = 0; t < tri_count; t++) {
+		for (int e = 0; e < 3; e++) {
+			int a = tri_idx[t * 3 + e];
+			int b = tri_idx[t * 3 + (e + 1) % 3];
+			uint64_t key = ((uint64_t)MIN(a, b) << 32) | (uint32_t)MAX(a, b);
+			edge_to_tris[key].push_back(t);
+		}
+	}
+
+	Vector3 extrude = -p_light_dir_objspace.normalized() * p_extrude_distance;
+
+	for (int t = 0; t < tri_count; t++) {
+		if (!faces_light[t]) {
+			continue;
+		}
+		int vi[3] = { tri_idx[t * 3 + 0], tri_idx[t * 3 + 1], tri_idx[t * 3 + 2] };
+		Vector3 vp[3] = { vr[vi[0]], vr[vi[1]], vr[vi[2]] };
+
+		// Front cap: the light-facing triangle itself, unmodified winding.
+		r_triangles.push_back(vp[0]);
+		r_triangles.push_back(vp[1]);
+		r_triangles.push_back(vp[2]);
+		// Back cap: the same triangle extruded, winding REVERSED so it
+		// faces the opposite way once translated behind the object --
+		// this is what closes the volume correctly for z-pass counting.
+		r_triangles.push_back(vp[0] + extrude);
+		r_triangles.push_back(vp[2] + extrude);
+		r_triangles.push_back(vp[1] + extrude);
+
+		for (int e = 0; e < 3; e++) {
+			int a = vi[e];
+			int b = vi[(e + 1) % 3];
+			uint64_t key = ((uint64_t)MIN(a, b) << 32) | (uint32_t)MAX(a, b);
+			const Vector<int> &owners = edge_to_tris[key];
+			bool is_silhouette = false;
+			if (owners.size() <= 1) {
+				is_silhouette = true; // boundary edge on a light-facing triangle
+			} else {
+				for (int k = 0; k < owners.size(); k++) {
+					if (owners[k] != t && !faces_light[owners[k]]) {
+						is_silhouette = true;
+						break;
+					}
+				}
+			}
+			if (!is_silhouette) {
+				continue;
+			}
+			Vector3 va = vr[a];
+			Vector3 vb = vr[b];
+			Vector3 va_ext = va + extrude;
+			Vector3 vb_ext = vb + extrude;
+			// Side quad (split into 2 triangles), wound to match the front
+			// cap's own directed-edge sense so the whole volume's outward
+			// winding stays consistent.
+			r_triangles.push_back(va);
+			r_triangles.push_back(vb);
+			r_triangles.push_back(vb_ext);
+			r_triangles.push_back(va);
+			r_triangles.push_back(vb_ext);
+			r_triangles.push_back(va_ext);
+		}
+	}
+}
+
+// The stencil-volume + additive-relight frame pass. Called once per frame
+// (not per-instance) from render_scene(), AFTER the normal opaque pass has
+// already populated the real color+depth buffers -- the shadow volumes'
+// own depth test needs to compare against that real scene depth to know
+// which fragments the shadow-casting light's ray actually reaches before
+// hitting real geometry. p_light_dir_world is GL's own light-position
+// convention already used elsewhere in this file: the direction FROM a
+// surface TOWARD the light, not the direction the light travels.
+static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count) {
+	static const float SHADOW_EXTRUDE_DISTANCE = 200.0f;
+
+	glDisable(GL_LIGHTING);
+	glDisable(GL_TEXTURE_2D);
+	glDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	glDisableClientState(GL_COLOR_ARRAY);
+	glDisableClientState(GL_NORMAL_ARRAY);
+	glEnableClientState(GL_VERTEX_ARRAY);
+
+	glClear(GL_STENCIL_BUFFER_BIT);
+	glEnable(GL_STENCIL_TEST);
+	glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+	glDepthMask(GL_FALSE);
+	glEnable(GL_DEPTH_TEST);
+	glDepthFunc(GL_LESS);
+	glStencilFunc(GL_ALWAYS, 0, 0xFF);
+
+	Vector<Vector3> vol_tris;
+	for (int i = 0; i < p_cull_count; i++) {
+		RasterizerScene::InstanceBase *instance = p_cull_result[i];
+		if (!instance->visible || instance->base_type != VS::INSTANCE_MESH) {
+			continue;
+		}
+		if (instance->cast_shadows == VS::SHADOW_CASTING_SETTING_OFF) {
+			continue;
+		}
+		RasterizerStorageGLFF::Mesh *mesh = p_storage->mesh_owner.getornull(instance->base);
+		if (!mesh) {
+			continue;
+		}
+
+		Basis inv_rot = instance->transform.basis.orthonormalized().transposed();
+		Vector3 light_dir_objspace = inv_rot.xform(p_light_dir_world).normalized();
+
+		vol_tris.resize(0);
+		for (int s = 0; s < mesh->surfaces.size(); s++) {
+			_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, vol_tris);
+		}
+		if (vol_tris.size() == 0) {
+			continue;
+		}
+
+		glPushMatrix();
+		GLfloat gl_model[16];
+		_load_transform_gl(instance->transform, gl_model);
+		glMultMatrixf(gl_model);
+
+		glVertexPointer(3, GL_FLOAT, 0, vol_tris.ptr());
+
+		glEnable(GL_CULL_FACE);
+		glCullFace(GL_BACK);
+		glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
+		glDrawArrays(GL_TRIANGLES, 0, vol_tris.size());
+
+		glCullFace(GL_FRONT);
+		glStencilOp(GL_KEEP, GL_KEEP, GL_DECR);
+		glDrawArrays(GL_TRIANGLES, 0, vol_tris.size());
+
+		glDisable(GL_CULL_FACE);
+		glPopMatrix();
+	}
+
+	// Additive relight: only this one light, only where the stencil buffer
+	// is still exactly 0 (never net-entered a shadow volume), only onto
+	// fragments that already exist at this exact depth (the opaque pass's
+	// own fragments -- GL_EQUAL, matching the same masking trick already
+	// used by the baked-lightmap pass above).
+	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+	glStencilFunc(GL_EQUAL, 0, 0xFF);
+	glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+	glDepthFunc(GL_EQUAL);
+	glDepthMask(GL_FALSE);
+	glEnable(GL_LIGHTING);
+	glEnable(p_gl_light);
+	glEnable(GL_BLEND);
+	glBlendEquation(GL_FUNC_ADD);
+	glBlendFunc(GL_ONE, GL_ONE);
+	glEnable(GL_CULL_FACE);
+	glCullFace(GL_BACK);
+
+	GLfloat zero_amb[4] = { 0, 0, 0, 1 };
+	glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero_amb); // ambient already accounted for in the base pass
+
+	for (int i = 0; i < p_cull_count; i++) {
+		RasterizerScene::InstanceBase *instance = p_cull_result[i];
+		if (!instance->visible || instance->base_type != VS::INSTANCE_MESH) {
+			continue;
+		}
+		RasterizerStorageGLFF::Mesh *mesh = p_storage->mesh_owner.getornull(instance->base);
+		if (!mesh) {
+			continue;
+		}
+
+		bool matrix_pushed = false;
+		for (int s = 0; s < mesh->surfaces.size(); s++) {
+			RasterizerStorageGLFF::Surface *surface = mesh->surfaces[s];
+			if (surface->vertex_count == 0 || !surface->has_normals) {
+				continue;
+			}
+
+			RID mat_rid = instance->material_override.is_valid() ? instance->material_override : ((s < instance->materials.size() && instance->materials[s].is_valid()) ? instance->materials[s] : surface->material);
+			RasterizerStorageGLFF::Material *mat = p_storage->material_owner.getornull(mat_rid);
+			RasterizerStorageGLFF::Shader *shader = (mat && mat->shader.is_valid()) ? p_storage->shader_owner.getornull(mat->shader) : nullptr;
+			bool surface_on_top = shader && shader->depth_test_disabled;
+			bool surface_unshaded = (mat && mat->ff_active) ? mat->ff_unshaded : (shader && shader->unshaded);
+			if (surface_on_top || surface_unshaded) {
+				continue; // matches the base pass's own pass==0/!surface_unshaded gating
+			}
+
+			if (!matrix_pushed) {
+				glPushMatrix();
+				GLfloat gl_model[16];
+				_load_transform_gl(instance->transform, gl_model);
+				glMultMatrixf(gl_model);
+				matrix_pushed = true;
+			}
+
+			Color albedo = mat ? mat->albedo : Color(1, 1, 1, 1);
+			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, 1.0f };
+			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
+			glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
+
+			PoolVector<Vector3>::Read vr = surface->vertices.read();
+			PoolVector<Vector3>::Read nr = surface->normals.read();
+			glVertexPointer(3, GL_FLOAT, 0, vr.ptr());
+			glEnableClientState(GL_NORMAL_ARRAY);
+			glNormalPointer(GL_FLOAT, 0, nr.ptr());
+
+			GLenum gl_primitive = _primitive_to_gl(surface->primitive);
+			if (surface->index_count > 0) {
+				GLenum index_type = (surface->vertex_count >= (1 << 16)) ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT;
+				PoolVector<uint8_t>::Read ir = surface->index_array.read();
+				glDrawElements(gl_primitive, surface->index_count, index_type, ir.ptr());
+			} else {
+				glDrawArrays(gl_primitive, 0, surface->vertex_count);
+			}
+		}
+		if (matrix_pushed) {
+			glPopMatrix();
+		}
+	}
+
+	glDisable(GL_STENCIL_TEST);
+	glDisable(p_gl_light);
+	glDepthFunc(GL_LEQUAL);
+	glDepthMask(GL_TRUE);
+	glDisable(GL_BLEND);
+	glDisableClientState(GL_NORMAL_ARRAY);
+}
+
 // Phase 3 (godot-ports#14 proposal): real mesh/material rendering, walking
 // p_cull_result instead of Phase 1's hardcoded test triangle. Scope
 // deliberately excludes (see rasterizer_storage_glff.h's Surface/Material
 // comments): normal-mapping (no tangents), lightmaps (no UV2), skinning (no
 // bones/weights -- fine for this driver's Phase 5 acceptance test, whose
-// player/mob animation is pure Pivot-node transform, not skeletal), shadows,
-// and the rest of SpatialMaterial's PBR params beyond albedo color/texture.
+// player/mob animation is pure Pivot-node transform, not skeletal), and the
+// rest of SpatialMaterial's PBR params beyond albedo color/texture. Real
+// stencil shadow volumes for one primary DirectionalLight (godot-ports#26)
+// ARE implemented -- see _render_primary_shadow_and_relight() above and
+// this function's own call site further down.
 // Lighting is per-vertex GL_LIGHT0-7 (up to 8, the GL 1.2 floor's
 // guaranteed minimum) driven directly off RasterizerStorageGLFF::Light's
 // already-real color/type/param storage.
@@ -621,6 +907,13 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// a full multi-light Dot3 blend -- see #38's own success criteria.
 	bool has_primary_directional_light = false;
 	Vector3 primary_directional_light_dir_world;
+	// godot-ports#26: which GL_LIGHTn (if any) is the primary shadow-
+	// casting directional light this frame, and whether it actually wants
+	// shadows (Light::shadow_enabled, wired for real by this issue --
+	// previously always false, a no-op stub). -1 means "no shadow pass
+	// this frame" -- the common case renders exactly as before.
+	GLenum primary_shadow_gl_light = 0;
+	bool primary_light_casts_shadow = false;
 
 	int max_lights = MIN(p_light_cull_count, 8);
 	if (max_lights > 0) {
@@ -661,6 +954,8 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				if (!has_primary_directional_light) {
 					has_primary_directional_light = true;
 					primary_directional_light_dir_world = dir;
+					primary_shadow_gl_light = gl_light;
+					primary_light_casts_shadow = light->shadow_enabled;
 				}
 			} else {
 				Vector3 origin = li->transform.origin;
@@ -689,6 +984,16 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	}
 	for (int i = max_lights; i < 8; i++) {
 		glDisable(GL_LIGHT0 + i);
+	}
+
+	// godot-ports#26: the base pass below must NOT include the shadow-
+	// casting light's own contribution -- it gets added back in
+	// separately by _render_primary_shadow_and_relight(), masked to only
+	// the unshadowed fragments. Its GL_POSITION/GL_DIFFUSE/etc are already
+	// set above; disabling it here only turns off its CONTRIBUTION for
+	// this base pass, it stays fully configured for later re-enabling.
+	if (primary_light_casts_shadow) {
+		glDisable(primary_shadow_gl_light);
 	}
 
 	// Two passes: real (depth-tested) scene content first, then anything
@@ -1206,6 +1511,17 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 				glPopMatrix();
 			}
 		}
+	}
+
+	// godot-ports#26: real stencil-shadow-volume pass + additive relight
+	// for the one primary shadow-casting DirectionalLight, if any. Must
+	// run AFTER the two passes above (needs their real, already-populated
+	// depth buffer to test shadow-volume fragments against) and BEFORE
+	// the glow capture below (glow should see the fully shadow-relit
+	// scene, matching how it already sees the lightmap pass's own
+	// contribution from inside the loop above).
+	if (primary_light_casts_shadow) {
+		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cull_result, p_cull_count);
 	}
 
 	// godot-ports#31: capture+blur+blend the fully-composited opaque/

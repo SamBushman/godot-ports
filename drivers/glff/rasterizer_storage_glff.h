@@ -815,6 +815,12 @@ public:
 		uint32_t cull_mask;
 		bool reverse_cull;
 		bool use_gi;
+		// godot-ports#26: real stencil-shadow-volume casting flag -- was
+		// previously discarded (light_set_shadow() below was a no-op).
+		// RasterizerSceneGLFF::render_scene() reads this directly off the
+		// first VS::LIGHT_DIRECTIONAL light it finds to decide whether to
+		// run the shadow-volume pass at all this frame.
+		bool shadow_enabled;
 
 		Light() {
 			type = VS::LIGHT_DIRECTIONAL;
@@ -826,6 +832,7 @@ public:
 			cull_mask = 0xFFFFFFFF;
 			reverse_cull = false;
 			use_gi = false;
+			shadow_enabled = false;
 		}
 	};
 	mutable RID_Owner<Light> light_owner;
@@ -846,7 +853,11 @@ public:
 		ERR_FAIL_INDEX(p_param, VS::LIGHT_PARAM_MAX);
 		l->param[p_param] = p_value;
 	}
-	virtual void light_set_shadow(RID p_light, bool p_enabled) {}
+	virtual void light_set_shadow(RID p_light, bool p_enabled) {
+		Light *l = light_owner.getornull(p_light);
+		ERR_FAIL_COND(!l);
+		l->shadow_enabled = p_enabled;
+	}
 	virtual void light_set_shadow_color(RID p_light, const Color &p_color) {}
 	virtual void light_set_projector(RID p_light, RID p_texture) {}
 	virtual void light_set_negative(RID p_light, bool p_enable) {
