@@ -597,6 +597,28 @@ static void _build_shadow_topology_if_needed(RasterizerStorageGLFF::Surface *p_s
 		p_surface->shadow_tri_indices.write[t * 3 + 2] = use_32 ? (int)idx32[t * 3 + 2] : (int)idx16[t * 3 + 2];
 	}
 
+	// godot-ports#48: compute + cache each triangle's raw (unnormalized)
+	// object-space geometric normal ONCE here, instead of recomputing the
+	// same cross product every frame in _build_shadow_volume_triangles()
+	// for a light direction that's the only thing that actually changes
+	// frame to frame. See Surface::shadow_tri_normal_x's field comment.
+	{
+		PoolVector<Vector3>::Read norm_vr = p_surface->vertices.read();
+		const int *norm_tri_idx = p_surface->shadow_tri_indices.ptr();
+		p_surface->shadow_tri_normal_x.resize(tri_count);
+		p_surface->shadow_tri_normal_y.resize(tri_count);
+		p_surface->shadow_tri_normal_z.resize(tri_count);
+		for (int t = 0; t < tri_count; t++) {
+			const Vector3 &v0 = norm_vr[norm_tri_idx[t * 3 + 0]];
+			const Vector3 &v1 = norm_vr[norm_tri_idx[t * 3 + 1]];
+			const Vector3 &v2 = norm_vr[norm_tri_idx[t * 3 + 2]];
+			Vector3 n = (v1 - v0).cross(v2 - v0); // not normalized -- only the dot's sign matters
+			p_surface->shadow_tri_normal_x.write[t] = n.x;
+			p_surface->shadow_tri_normal_y.write[t] = n.y;
+			p_surface->shadow_tri_normal_z.write[t] = n.z;
+		}
+	}
+
 	// godot-ports#26 bugfix: real meshes (Godot's own CubeMesh, any glTF
 	// export like this project's mob.glb/player.glb) duplicate vertices at
 	// every hard edge/UV seam so each face can carry its own normal/UV --
@@ -672,6 +694,27 @@ static void _build_shadow_topology_if_needed(RasterizerStorageGLFF::Surface *p_s
 			p_surface->shadow_tri_edges.write[t * 3 + e] = edge_idx;
 		}
 	}
+
+	// godot-ports#48 phase 2: flatten each edge's owner_tris (a separate
+	// heap-allocated Vector<int> per edge -- see the field comment on
+	// shadow_edge_owner0/1) into two parallel arrays indexed directly by
+	// edge index, so the per-frame silhouette test doesn't have to follow
+	// shadow_edges[ei].owner_tris.ptr() (a scattered, individually
+	// allocated buffer per edge) just to read 1-2 ints.
+	int edge_count = p_surface->shadow_edges.size();
+	p_surface->shadow_edge_owner0.resize(edge_count);
+	p_surface->shadow_edge_owner1.resize(edge_count);
+	for (int ei = 0; ei < edge_count; ei++) {
+		const Vector<int> &owners = p_surface->shadow_edges[ei].owner_tris;
+		p_surface->shadow_edge_owner0.write[ei] = owners[0];
+		if (owners.size() == 1) {
+			p_surface->shadow_edge_owner1.write[ei] = -1; // boundary edge
+		} else if (owners.size() == 2) {
+			p_surface->shadow_edge_owner1.write[ei] = owners[1];
+		} else {
+			p_surface->shadow_edge_owner1.write[ei] = -2; // non-manifold overflow -- caller falls back to owner_tris
+		}
+	}
 }
 
 static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, Vector<Vector3> &r_triangles) {
@@ -685,55 +728,97 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 	const int *tri_idx = p_surface->shadow_tri_indices.ptr();
 
 	// Only this part is genuinely per-frame/light-dependent: which
-	// triangles currently face the light. The edge adjacency itself
-	// (p_surface->shadow_edges) was already built (or reused from the
-	// cache) above.
+	// triangles currently face the light. Both the geometric normal
+	// (shadow_tri_normal_x/y/z, cached at topology-build time) and the
+	// edge adjacency (shadow_edges/shadow_edge_owner0/1) were already
+	// built (or reused from the cache) above -- this is now just a dot
+	// product per triangle against a cached vector, no vertex reads, no
+	// cross product.
 	Vector<bool> faces_light;
 	faces_light.resize(tri_count);
+	const float *nx = p_surface->shadow_tri_normal_x.ptr();
+	const float *ny = p_surface->shadow_tri_normal_y.ptr();
+	const float *nz = p_surface->shadow_tri_normal_z.ptr();
 	for (int t = 0; t < tri_count; t++) {
-		Vector3 v0 = vr[tri_idx[t * 3 + 0]], v1 = vr[tri_idx[t * 3 + 1]], v2 = vr[tri_idx[t * 3 + 2]];
-		Vector3 n = (v1 - v0).cross(v2 - v0); // not normalized -- only the dot's sign matters
-		faces_light.write[t] = n.dot(p_light_dir_objspace) > 0.0f;
+		faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
 	}
 
 	Vector3 extrude = -p_light_dir_objspace.normalized() * p_extrude_distance;
 
+	// Caps: exactly one front+back cap pair per light-facing triangle,
+	// nothing shared between triangles here -- unchanged from before.
+	for (int t = 0; t < tri_count; t++) {
+		if (!faces_light[t]) {
+			continue;
+		}
+		Vector3 vp0 = vr[tri_idx[t * 3 + 0]], vp1 = vr[tri_idx[t * 3 + 1]], vp2 = vr[tri_idx[t * 3 + 2]];
+
+		// Front cap: the light-facing triangle itself, unmodified winding.
+		r_triangles.push_back(vp0);
+		r_triangles.push_back(vp1);
+		r_triangles.push_back(vp2);
+		// Back cap: the same triangle extruded, winding REVERSED so it
+		// faces the opposite way once translated behind the object --
+		// this is what closes the volume correctly for z-pass counting.
+		r_triangles.push_back(vp0 + extrude);
+		r_triangles.push_back(vp2 + extrude);
+		r_triangles.push_back(vp1 + extrude);
+	}
+
+	// godot-ports#48 phase 2: silhouette walls. Two prior restructurings of
+	// this loop were tried and rejected (see the #48 comment thread for
+	// the numbers): a pure edge-centric walk gave up the outer loop's
+	// cheap "skip dark triangles entirely" and roughly broke even; adding
+	// a per-frame visited-edge tracking array on top of the original
+	// per-triangle walk cost MORE than the redundant owners-list rescans
+	// it eliminated. The real bottleneck was never redundant computation
+	// -- there isn't any real math in this loop to redo (determining
+	// silhouette-ness is pure lookups/comparisons, no floating point at
+	// all) -- it's memory INDIRECTION: shadow_edges[ei].owner_tris is a
+	// separate heap-allocated Vector<int> PER EDGE, so reading a shared
+	// edge's 1-2 owners meant hopping into a scattered, individually
+	// allocated buffer for every edge, every frame. shadow_edge_owner0/1
+	// (flat arrays, built once alongside the rest of the topology cache)
+	// replace that hop with a single direct array read, keeping the
+	// original triangle-centric outer loop (still skips dark triangles
+	// for ~free) and the original per-triangle emission (still uses `t`'s
+	// own vi[e]/vi[(e+1)%3] directly, no reverse-search needed to recover
+	// a specific owner's directed edge order).
 	for (int t = 0; t < tri_count; t++) {
 		if (!faces_light[t]) {
 			continue;
 		}
 		int vi[3] = { tri_idx[t * 3 + 0], tri_idx[t * 3 + 1], tri_idx[t * 3 + 2] };
-		Vector3 vp[3] = { vr[vi[0]], vr[vi[1]], vr[vi[2]] };
-
-		// Front cap: the light-facing triangle itself, unmodified winding.
-		r_triangles.push_back(vp[0]);
-		r_triangles.push_back(vp[1]);
-		r_triangles.push_back(vp[2]);
-		// Back cap: the same triangle extruded, winding REVERSED so it
-		// faces the opposite way once translated behind the object --
-		// this is what closes the volume correctly for z-pass counting.
-		r_triangles.push_back(vp[0] + extrude);
-		r_triangles.push_back(vp[2] + extrude);
-		r_triangles.push_back(vp[1] + extrude);
-
 		for (int e = 0; e < 3; e++) {
 			int a = vi[e];
 			int b = vi[(e + 1) % 3];
-			// shadow_tri_edges[t*3+e] was already resolved once, at
-			// topology-build time, to this exact edge's index -- no
-			// per-frame re-keying or searching needed.
-			const RasterizerStorageGLFF::Surface::ShadowEdge &edge = p_surface->shadow_edges[p_surface->shadow_tri_edges[t * 3 + e]];
-			const Vector<int> &owners = edge.owner_tris;
-			bool is_silhouette = false;
-			if (owners.size() <= 1) {
-				is_silhouette = true; // boundary edge on a light-facing triangle
-			} else {
+			int ei = p_surface->shadow_tri_edges[t * 3 + e];
+			int o1 = p_surface->shadow_edge_owner1[ei];
+			bool is_silhouette;
+			if (o1 == -1) {
+				is_silhouette = true; // boundary edge -- t is its only owner
+			} else if (o1 == -2) {
+				// Rare non-manifold case (3+ owners) -- fast arrays can't
+				// represent it, fall back to the full owners-list scan:
+				// silhouette from t's perspective iff some OTHER owner
+				// doesn't face the light. Same logic (and cost) as the
+				// very first version of this loop had for every edge.
+				const Vector<int> &owners = p_surface->shadow_edges[ei].owner_tris;
+				is_silhouette = false;
 				for (int k = 0; k < owners.size(); k++) {
 					if (owners[k] != t && !faces_light[owners[k]]) {
 						is_silhouette = true;
 						break;
 					}
 				}
+			} else {
+				// The overwhelmingly common case: exactly 2 owners, one
+				// of which is `t` itself. Silhouette iff the OTHER owner
+				// doesn't face the light -- both lit means this edge is
+				// purely interior, no wall needed.
+				int o0 = p_surface->shadow_edge_owner0[ei];
+				int other = (o0 == t) ? o1 : o0;
+				is_silhouette = !faces_light[other];
 			}
 			if (!is_silhouette) {
 				continue;
