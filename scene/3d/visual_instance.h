@@ -36,6 +36,8 @@
 #include "scene/3d/cull_instance.h"
 #include "scene/resources/material.h"
 
+class Mesh;
+
 class VisualInstance : public CullInstance {
 	GDCLASS(VisualInstance, CullInstance);
 	OBJ_CATEGORY("3D Visual Nodes");
@@ -114,11 +116,37 @@ public:
 		SHADOW_CASTING_SETTING_SHADOWS_ONLY = VS::SHADOW_CASTING_SETTING_SHADOWS_ONLY
 	};
 
+	// godot-ports#54: GLFF shadow-volume optimization strategy, three
+	// independent composable axes -- see VisualServer's own enum comments
+	// (servers/visual_server.h) for the full per-technique rationale
+	// (godot-ports#49-53). Default (0) on every axis is today's exact
+	// existing behavior; only the GLFF backend reads these at all.
+	enum ShadowGeometrySource {
+		SHADOW_GEOMETRY_SOURCE_RENDER_MESH = VS::SHADOW_GEOMETRY_SOURCE_RENDER_MESH,
+		SHADOW_GEOMETRY_SOURCE_LOD_PROXY = VS::SHADOW_GEOMETRY_SOURCE_LOD_PROXY,
+	};
+
+	enum ShadowSilhouetteAlgorithm {
+		SHADOW_SILHOUETTE_ALGORITHM_FULL = VS::SHADOW_SILHOUETTE_ALGORITHM_FULL,
+		SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE = VS::SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE,
+		SHADOW_SILHOUETTE_ALGORITHM_RING_SEGMENT = VS::SHADOW_SILHOUETTE_ALGORITHM_RING_SEGMENT,
+	};
+
+	enum ShadowTemporalCache {
+		SHADOW_TEMPORAL_CACHE_NONE = VS::SHADOW_TEMPORAL_CACHE_NONE,
+		SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED = VS::SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED,
+		SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE = VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE,
+	};
+
 private:
 	bool flags[FLAG_MAX];
 	bool generate_lightmap;
 	LightmapScale lightmap_scale;
 	ShadowCastingSetting shadow_casting_setting;
+	ShadowGeometrySource shadow_geometry_source;
+	ShadowSilhouetteAlgorithm shadow_silhouette_algorithm;
+	ShadowTemporalCache shadow_temporal_cache;
+	Ref<Mesh> shadow_lod_proxy_mesh;
 	Ref<Material> material_override;
 	Ref<Material> material_overlay;
 
@@ -134,6 +162,18 @@ public:
 
 	void set_cast_shadows_setting(ShadowCastingSetting p_shadow_casting_setting);
 	ShadowCastingSetting get_cast_shadows_setting() const;
+
+	void set_shadow_geometry_source(ShadowGeometrySource p_source);
+	ShadowGeometrySource get_shadow_geometry_source() const;
+
+	void set_shadow_silhouette_algorithm(ShadowSilhouetteAlgorithm p_algorithm);
+	ShadowSilhouetteAlgorithm get_shadow_silhouette_algorithm() const;
+
+	void set_shadow_temporal_cache(ShadowTemporalCache p_cache);
+	ShadowTemporalCache get_shadow_temporal_cache() const;
+
+	void set_shadow_lod_proxy_mesh(const Ref<Mesh> &p_mesh);
+	Ref<Mesh> get_shadow_lod_proxy_mesh() const;
 
 	void set_generate_lightmap(bool p_enabled);
 	bool get_generate_lightmap() const;
@@ -158,5 +198,8 @@ public:
 VARIANT_ENUM_CAST(GeometryInstance::Flags);
 VARIANT_ENUM_CAST(GeometryInstance::LightmapScale);
 VARIANT_ENUM_CAST(GeometryInstance::ShadowCastingSetting);
+VARIANT_ENUM_CAST(GeometryInstance::ShadowGeometrySource);
+VARIANT_ENUM_CAST(GeometryInstance::ShadowSilhouetteAlgorithm);
+VARIANT_ENUM_CAST(GeometryInstance::ShadowTemporalCache);
 
 #endif // VISUAL_INSTANCE_H

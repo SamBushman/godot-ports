@@ -871,6 +871,10 @@ public:
 	virtual void instance_geometry_set_cast_shadows_setting(RID p_instance, VS::ShadowCastingSetting p_shadow_casting_setting);
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material);
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material);
+	virtual void instance_geometry_set_shadow_geometry_source(RID p_instance, VS::ShadowGeometrySource p_source);
+	virtual void instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, VS::ShadowSilhouetteAlgorithm p_algorithm);
+	virtual void instance_geometry_set_shadow_temporal_cache(RID p_instance, VS::ShadowTemporalCache p_cache);
+	virtual void instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh);
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance);
 	_FORCE_INLINE_ void _update_instance_aabb(Instance *p_instance);

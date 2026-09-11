@@ -655,6 +655,10 @@ public:
 	BIND2(instance_geometry_set_cast_shadows_setting, RID, ShadowCastingSetting)
 	BIND2(instance_geometry_set_material_override, RID, RID)
 	BIND2(instance_geometry_set_material_overlay, RID, RID)
+	BIND2(instance_geometry_set_shadow_geometry_source, RID, ShadowGeometrySource)
+	BIND2(instance_geometry_set_shadow_silhouette_algorithm, RID, ShadowSilhouetteAlgorithm)
+	BIND2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
+	BIND2(instance_geometry_set_shadow_lod_proxy, RID, RID)
 
 #undef BINDBASE
 //from now on, calls forwarded to this singleton

@@ -30,6 +30,7 @@
 
 #include "visual_instance.h"
 
+#include "scene/resources/mesh.h"
 #include "scene/scene_string_names.h"
 #include "servers/visual_server.h"
 #include "skeleton.h"
@@ -302,6 +303,56 @@ GeometryInstance::ShadowCastingSetting GeometryInstance::get_cast_shadows_settin
 	return shadow_casting_setting;
 }
 
+// godot-ports#54: shadow-volume optimization strategy setters/getters.
+// Same "only push to VS if actually different" shape as
+// set_cast_shadows_setting() above, but none of these need a
+// base_changed() call on the VS side -- they never affect culling/AABB,
+// only how the GLFF backend computes shadow-volume geometry once an
+// instance is already known to cast a shadow.
+void GeometryInstance::set_shadow_geometry_source(ShadowGeometrySource p_source) {
+	if (p_source != shadow_geometry_source) {
+		shadow_geometry_source = p_source;
+		VS::get_singleton()->instance_geometry_set_shadow_geometry_source(get_instance(), (VS::ShadowGeometrySource)p_source);
+	}
+}
+
+GeometryInstance::ShadowGeometrySource GeometryInstance::get_shadow_geometry_source() const {
+	return shadow_geometry_source;
+}
+
+void GeometryInstance::set_shadow_silhouette_algorithm(ShadowSilhouetteAlgorithm p_algorithm) {
+	if (p_algorithm != shadow_silhouette_algorithm) {
+		shadow_silhouette_algorithm = p_algorithm;
+		VS::get_singleton()->instance_geometry_set_shadow_silhouette_algorithm(get_instance(), (VS::ShadowSilhouetteAlgorithm)p_algorithm);
+	}
+}
+
+GeometryInstance::ShadowSilhouetteAlgorithm GeometryInstance::get_shadow_silhouette_algorithm() const {
+	return shadow_silhouette_algorithm;
+}
+
+void GeometryInstance::set_shadow_temporal_cache(ShadowTemporalCache p_cache) {
+	if (p_cache != shadow_temporal_cache) {
+		shadow_temporal_cache = p_cache;
+		VS::get_singleton()->instance_geometry_set_shadow_temporal_cache(get_instance(), (VS::ShadowTemporalCache)p_cache);
+	}
+}
+
+GeometryInstance::ShadowTemporalCache GeometryInstance::get_shadow_temporal_cache() const {
+	return shadow_temporal_cache;
+}
+
+void GeometryInstance::set_shadow_lod_proxy_mesh(const Ref<Mesh> &p_mesh) {
+	if (p_mesh != shadow_lod_proxy_mesh) {
+		shadow_lod_proxy_mesh = p_mesh;
+		VS::get_singleton()->instance_geometry_set_shadow_lod_proxy(get_instance(), p_mesh.is_valid() ? p_mesh->get_rid() : RID());
+	}
+}
+
+Ref<Mesh> GeometryInstance::get_shadow_lod_proxy_mesh() const {
+	return shadow_lod_proxy_mesh;
+}
+
 void GeometryInstance::set_extra_cull_margin(float p_margin) {
 	ERR_FAIL_COND(p_margin < 0);
 	if (p_margin != extra_cull_margin) {
@@ -331,6 +382,18 @@ void GeometryInstance::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_cast_shadows_setting", "shadow_casting_setting"), &GeometryInstance::set_cast_shadows_setting);
 	ClassDB::bind_method(D_METHOD("get_cast_shadows_setting"), &GeometryInstance::get_cast_shadows_setting);
 
+	ClassDB::bind_method(D_METHOD("set_shadow_geometry_source", "source"), &GeometryInstance::set_shadow_geometry_source);
+	ClassDB::bind_method(D_METHOD("get_shadow_geometry_source"), &GeometryInstance::get_shadow_geometry_source);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_silhouette_algorithm", "algorithm"), &GeometryInstance::set_shadow_silhouette_algorithm);
+	ClassDB::bind_method(D_METHOD("get_shadow_silhouette_algorithm"), &GeometryInstance::get_shadow_silhouette_algorithm);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_temporal_cache", "cache"), &GeometryInstance::set_shadow_temporal_cache);
+	ClassDB::bind_method(D_METHOD("get_shadow_temporal_cache"), &GeometryInstance::get_shadow_temporal_cache);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_lod_proxy_mesh", "mesh"), &GeometryInstance::set_shadow_lod_proxy_mesh);
+	ClassDB::bind_method(D_METHOD("get_shadow_lod_proxy_mesh"), &GeometryInstance::get_shadow_lod_proxy_mesh);
+
 	ClassDB::bind_method(D_METHOD("set_generate_lightmap", "enabled"), &GeometryInstance::set_generate_lightmap);
 	ClassDB::bind_method(D_METHOD("get_generate_lightmap"), &GeometryInstance::get_generate_lightmap);
 
@@ -354,6 +417,39 @@ void GeometryInstance::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "cast_shadow", PROPERTY_HINT_ENUM, "Off,On,Double-Sided,Shadows Only"), "set_cast_shadows_setting", "get_cast_shadows_setting");
 	ADD_PROPERTY(PropertyInfo(Variant::REAL, "extra_cull_margin", PROPERTY_HINT_RANGE, "0,16384,0.01"), "set_extra_cull_margin", "get_extra_cull_margin");
 
+	// godot-ports#54: GLFF-only shadow-volume optimization strategy, three
+	// independent axes that compose (e.g. a LOD proxy walked with the
+	// normal-cone algorithm under temporal-coherence caching, all at once).
+	// Defaults on every axis reproduce today's exact pre-#54 behavior; only
+	// touch these if you're specifically tuning GLFF shadow cost for a
+	// particular mesh -- see each option's own guidance below.
+	ADD_GROUP("Shadow Optimization (GLFF)", "shadow_");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_geometry_source", PROPERTY_HINT_ENUM,
+						 "Render Mesh (default -- exact silhouette, full render-mesh triangle count),"
+						 "LOD Proxy (godot-ports#51 -- walk shadow_lod_proxy_mesh instead; cheaper, "
+						 "less precise silhouette, good for smooth/round meshes viewed at a distance)"),
+			"set_shadow_geometry_source", "get_shadow_geometry_source");
+	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "shadow_lod_proxy_mesh", PROPERTY_HINT_RESOURCE_TYPE, "Mesh"),
+			"set_shadow_lod_proxy_mesh", "get_shadow_lod_proxy_mesh");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_silhouette_algorithm", PROPERTY_HINT_ENUM,
+						 "Full (default -- exact per-triangle test every frame, always correct),"
+						 "Normal Cone (godot-ports#49 -- clusters triangles by facing direction; best "
+						 "for boxy/architectural meshes with tightly-grouped normals, weakest on round "
+						 "shapes like spheres),"
+						 "Ring/Segment (godot-ports#50 -- exploits SphereMesh/CylinderMesh's own known "
+						 "ring topology + convexity; ONLY applies to those primitive mesh types, silently "
+						 "falls back to Full on any other mesh)"),
+			"set_shadow_silhouette_algorithm", "get_shadow_silhouette_algorithm");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_temporal_cache", PROPERTY_HINT_ENUM,
+						 "None (default -- no cross-frame caching),"
+						 "Direction-Quantized (godot-ports#52 -- precomputed bucketed-light-direction "
+						 "lookup; best when the LIGHT direction changes slowly or discretely, provides "
+						 "little/no benefit for a caster that itself rotates quickly under a fixed light),"
+						 "Temporal Coherence (godot-ports#53 -- tracks the silhouette boundary "
+						 "incrementally frame to frame with an automatic safety-net fallback for fast "
+						 "rotation; best for moderate, realistic animation speeds)"),
+			"set_shadow_temporal_cache", "get_shadow_temporal_cache");
+
 	ADD_GROUP("Baked Light", "");
 	ADD_PROPERTYI(PropertyInfo(Variant::BOOL, "use_in_baked_light"), "set_flag", "get_flag", FLAG_USE_BAKED_LIGHT);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "generate_lightmap"), "set_generate_lightmap", "get_generate_lightmap");
@@ -372,6 +468,17 @@ void GeometryInstance::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SHADOWS_ONLY);
 
+	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_RENDER_MESH);
+	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_LOD_PROXY);
+
+	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_FULL);
+	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE);
+	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_RING_SEGMENT);
+
+	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_NONE);
+	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED);
+	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE);
+
 	BIND_ENUM_CONSTANT(FLAG_USE_BAKED_LIGHT);
 	BIND_ENUM_CONSTANT(FLAG_DRAW_NEXT_FRAME_IF_VISIBLE);
 	BIND_ENUM_CONSTANT(FLAG_MAX);
@@ -383,6 +490,9 @@ GeometryInstance::GeometryInstance() {
 	}
 
 	shadow_casting_setting = SHADOW_CASTING_SETTING_ON;
+	shadow_geometry_source = SHADOW_GEOMETRY_SOURCE_RENDER_MESH;
+	shadow_silhouette_algorithm = SHADOW_SILHOUETTE_ALGORITHM_FULL;
+	shadow_temporal_cache = SHADOW_TEMPORAL_CACHE_NONE;
 	extra_cull_margin = 0;
 	generate_lightmap = true;
 	lightmap_scale = LightmapScale::LIGHTMAP_SCALE_1X;

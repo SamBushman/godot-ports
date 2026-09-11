@@ -563,6 +563,10 @@ public:
 	FUNC2(instance_geometry_set_cast_shadows_setting, RID, ShadowCastingSetting)
 	FUNC2(instance_geometry_set_material_override, RID, RID)
 	FUNC2(instance_geometry_set_material_overlay, RID, RID)
+	FUNC2(instance_geometry_set_shadow_geometry_source, RID, ShadowGeometrySource)
+	FUNC2(instance_geometry_set_shadow_silhouette_algorithm, RID, ShadowSilhouetteAlgorithm)
+	FUNC2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
+	FUNC2(instance_geometry_set_shadow_lod_proxy, RID, RID)
 
 	/* CANVAS (2D) */
 

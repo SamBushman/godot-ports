@@ -999,6 +999,33 @@ public:
 	virtual void instance_geometry_set_material_override(RID p_instance, RID p_material) = 0;
 	virtual void instance_geometry_set_material_overlay(RID p_instance, RID p_material) = 0;
 
+	// godot-ports#54: three independent, composable shadow-volume
+	// optimization axes for the GLFF backend (godot-ports#49-53). Zero
+	// value on each axis is today's existing exact behavior -- see
+	// RasterizerScene::InstanceBase's own field comment. Backends other
+	// than GLFF simply never read these.
+	enum ShadowGeometrySource {
+		SHADOW_GEOMETRY_SOURCE_RENDER_MESH, // godot-ports#54 default: walk the actual render mesh, today's behavior
+		SHADOW_GEOMETRY_SOURCE_LOD_PROXY, // godot-ports#51: walk a lower-poly proxy mesh instead
+	};
+
+	enum ShadowSilhouetteAlgorithm {
+		SHADOW_SILHOUETTE_ALGORITHM_FULL, // godot-ports#54 default: unconditional per-triangle test, today's behavior
+		SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE, // godot-ports#49: flat 6-bucket normal-cone cluster culling
+		SHADOW_SILHOUETTE_ALGORITHM_RING_SEGMENT, // godot-ports#50: ring/segment + binary search (SphereMesh/CylinderMesh only)
+	};
+
+	enum ShadowTemporalCache {
+		SHADOW_TEMPORAL_CACHE_NONE, // godot-ports#54 default: no cross-frame caching, today's behavior
+		SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED, // godot-ports#52: precomputed bucket-snap silhouette lookup
+		SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE, // godot-ports#53: incremental terminator/boundary-set tracking
+	};
+
+	virtual void instance_geometry_set_shadow_geometry_source(RID p_instance, ShadowGeometrySource p_source) = 0;
+	virtual void instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, ShadowSilhouetteAlgorithm p_algorithm) = 0;
+	virtual void instance_geometry_set_shadow_temporal_cache(RID p_instance, ShadowTemporalCache p_cache) = 0;
+	virtual void instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh) = 0;
+
 	/* CANVAS (2D) */
 
 	virtual RID canvas_create() = 0;
@@ -1281,6 +1308,9 @@ VARIANT_ENUM_CAST(VisualServer::EnvironmentSSAOQuality);
 VARIANT_ENUM_CAST(VisualServer::EnvironmentSSAOBlur);
 VARIANT_ENUM_CAST(VisualServer::InstanceFlags);
 VARIANT_ENUM_CAST(VisualServer::ShadowCastingSetting);
+VARIANT_ENUM_CAST(VisualServer::ShadowGeometrySource);
+VARIANT_ENUM_CAST(VisualServer::ShadowSilhouetteAlgorithm);
+VARIANT_ENUM_CAST(VisualServer::ShadowTemporalCache);
 VARIANT_ENUM_CAST(VisualServer::TextureType);
 VARIANT_ENUM_CAST(VisualServer::ChangedPriority);
 

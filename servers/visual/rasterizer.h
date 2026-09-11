@@ -115,6 +115,18 @@ public:
 
 		VS::ShadowCastingSetting cast_shadows;
 
+		// godot-ports#54: per-instance shadow-volume optimization strategy,
+		// three independent axes (see the GLFF shadow-optimization family,
+		// godot-ports#49-53). Each axis's zero value is today's exact
+		// existing behavior -- an instance that never touches these fields
+		// behaves byte-for-byte as before this was added. Only consumed by
+		// the GLFF backend (drivers/glff/rasterizer_scene_glff.cpp); other
+		// rasterizers ignore them entirely.
+		VS::ShadowGeometrySource shadow_geometry_source;
+		VS::ShadowSilhouetteAlgorithm shadow_silhouette_algorithm;
+		VS::ShadowTemporalCache shadow_temporal_cache;
+		RID shadow_lod_proxy_mesh; // godot-ports#51: explicit proxy mesh RID; invalid == auto-generate/cache one when shadow_geometry_source == SHADOW_GEOMETRY_SOURCE_LOD_PROXY
+
 		//fit in 32 bits
 		bool mirror : 1;
 		bool receive_shadows : 1;
@@ -148,6 +160,9 @@ public:
 				dependency_item(this) {
 			base_type = VS::INSTANCE_NONE;
 			cast_shadows = VS::SHADOW_CASTING_SETTING_ON;
+			shadow_geometry_source = VS::SHADOW_GEOMETRY_SOURCE_RENDER_MESH;
+			shadow_silhouette_algorithm = VS::SHADOW_SILHOUETTE_ALGORITHM_FULL;
+			shadow_temporal_cache = VS::SHADOW_TEMPORAL_CACHE_NONE;
 			receive_shadows = true;
 			visible = true;
 			depth_layer = 0;

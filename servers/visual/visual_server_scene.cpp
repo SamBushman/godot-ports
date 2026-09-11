@@ -1862,6 +1862,39 @@ void VisualServerScene::instance_geometry_set_cast_shadows_setting(RID p_instanc
 	instance->cast_shadows = p_shadow_casting_setting;
 	instance->base_changed(false, true); // to actually compute if shadows are visible or not
 }
+
+// godot-ports#54: shadow-optimization strategy axes, consumed only by the
+// GLFF backend (see rasterizer_scene_glff.cpp). No AABB/material change is
+// implied by any of these, so no base_changed() call is needed -- unlike
+// cast_shadows_setting above, which can change whether an instance is
+// culled into the shadow pass at all.
+void VisualServerScene::instance_geometry_set_shadow_geometry_source(RID p_instance, VS::ShadowGeometrySource p_source) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_geometry_source = p_source;
+}
+
+void VisualServerScene::instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, VS::ShadowSilhouetteAlgorithm p_algorithm) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_silhouette_algorithm = p_algorithm;
+}
+
+void VisualServerScene::instance_geometry_set_shadow_temporal_cache(RID p_instance, VS::ShadowTemporalCache p_cache) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_temporal_cache = p_cache;
+}
+
+void VisualServerScene::instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_lod_proxy_mesh = p_proxy_mesh;
+}
 void VisualServerScene::instance_geometry_set_material_override(RID p_instance, RID p_material) {
 	Instance *instance = instance_owner.get(p_instance);
 	ERR_FAIL_COND(!instance);

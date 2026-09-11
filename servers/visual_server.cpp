@@ -2186,6 +2186,10 @@ void VisualServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_cast_shadows_setting", "instance", "shadow_casting_setting"), &VisualServer::instance_geometry_set_cast_shadows_setting);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_override", "instance", "material"), &VisualServer::instance_geometry_set_material_override);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_material_overlay", "instance", "material"), &VisualServer::instance_geometry_set_material_overlay);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_geometry_source", "instance", "source"), &VisualServer::instance_geometry_set_shadow_geometry_source);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_silhouette_algorithm", "instance", "algorithm"), &VisualServer::instance_geometry_set_shadow_silhouette_algorithm);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_temporal_cache", "instance", "cache"), &VisualServer::instance_geometry_set_shadow_temporal_cache);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_lod_proxy", "instance", "proxy_mesh"), &VisualServer::instance_geometry_set_shadow_lod_proxy);
 
 	ClassDB::bind_method(D_METHOD("instances_cull_aabb", "aabb", "scenario"), &VisualServer::_instances_cull_aabb_bind, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("instances_cull_ray", "from", "to", "scenario"), &VisualServer::_instances_cull_ray_bind, DEFVAL(RID()));
@@ -2489,6 +2493,17 @@ void VisualServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_ON);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_DOUBLE_SIDED);
 	BIND_ENUM_CONSTANT(SHADOW_CASTING_SETTING_SHADOWS_ONLY);
+
+	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_RENDER_MESH);
+	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_LOD_PROXY);
+
+	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_FULL);
+	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE);
+	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_RING_SEGMENT);
+
+	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_NONE);
+	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED);
+	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE);
 
 	BIND_ENUM_CONSTANT(NINE_PATCH_STRETCH);
 	BIND_ENUM_CONSTANT(NINE_PATCH_TILE);
