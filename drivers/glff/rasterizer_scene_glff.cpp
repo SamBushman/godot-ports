@@ -1450,6 +1450,26 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			continue;
 		}
 
+		// godot-ports#51: LOD proxy geometry source -- walk a separate,
+		// lower-poly Mesh for shadow-volume construction instead of the
+		// actual render mesh, when explicitly assigned. Purely a
+		// substitution at THIS point (which Surfaces get walked below);
+		// everything else about this instance (its own transform, the
+		// per-instance cache, the light direction) is unaffected, and the
+		// proxy is assumed authored in the same local coordinate space as
+		// the render mesh (same convention as shadow_lod_proxy_mesh's own
+		// property doc). An invalid/unresolvable proxy RID (never
+		// assigned, or a freed resource) safely falls back to the real
+		// render mesh -- GLFF never silently drops a caster's shadow for a
+		// misconfigured proxy.
+		RasterizerStorageGLFF::Mesh *shadow_mesh = mesh;
+		if (instance->shadow_geometry_source == VS::SHADOW_GEOMETRY_SOURCE_LOD_PROXY && instance->shadow_lod_proxy_mesh.is_valid()) {
+			RasterizerStorageGLFF::Mesh *proxy = p_storage->mesh_owner.getornull(instance->shadow_lod_proxy_mesh);
+			if (proxy) {
+				shadow_mesh = proxy;
+			}
+		}
+
 		Basis inv_rot = instance->transform.basis.orthonormalized().transposed();
 		Vector3 light_dir_objspace = inv_rot.xform(p_light_dir_world).normalized();
 
@@ -1475,16 +1495,16 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		// for how a since-destroyed instance's stale entry gets cleared
 		// out rather than accumulating forever.
 		Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry>::Element *CE = shadow_volume_cache.find(instance);
-		bool cache_hit = CE && CE->value().mesh == mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm && CE->value().ring_radial_segments == instance->shadow_ring_radial_segments && CE->value().ring_count == instance->shadow_ring_count;
+		bool cache_hit = CE && CE->value().mesh == shadow_mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm && CE->value().ring_radial_segments == instance->shadow_ring_radial_segments && CE->value().ring_count == instance->shadow_ring_count;
 		if (!CE) {
 			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
 		if (!cache_hit) {
 			CE->value().vol_tris.resize(0);
-			for (int s = 0; s < mesh->surfaces.size(); s++) {
-				_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, CE->value().vol_tris);
+			for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
+				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, CE->value().vol_tris);
 			}
-			CE->value().mesh = mesh;
+			CE->value().mesh = shadow_mesh;
 			CE->value().transform = instance->transform;
 			CE->value().light_dir_objspace = light_dir_objspace;
 			CE->value().algorithm = instance->shadow_silhouette_algorithm;
