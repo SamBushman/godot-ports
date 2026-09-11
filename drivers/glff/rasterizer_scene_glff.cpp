@@ -1289,6 +1289,50 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 // cheaper and simpler to drop the whole thing and let it repopulate from
 // scratch (a one-frame cost) than to chase down which entries are actually
 // stale.
+// godot-ports#52: direction-quantized precomputed silhouette caching.
+// Fixed set of 26 evenly-spread unit directions (a cube's 6 face normals +
+// 12 edge midpoint directions + 8 corner directions, all normalized) --
+// a standard, simple discrete covering of the sphere of directions, not
+// hand-tuned. Real per-frame cost is just finding the nearest of these 26
+// via max dot product (26 dot products + compares, no trig) -- cheap
+// regardless of whether the result hits or misses the object-space light
+// direction's own per-instance cache slot.
+static const Vector3 DIRECTION_BUCKET_DIRS_RAW[26] = {
+	// 6 face directions
+	Vector3(1, 0, 0), Vector3(-1, 0, 0), Vector3(0, 1, 0), Vector3(0, -1, 0), Vector3(0, 0, 1), Vector3(0, 0, -1),
+	// 12 edge directions
+	Vector3(1, 1, 0), Vector3(1, -1, 0), Vector3(-1, 1, 0), Vector3(-1, -1, 0),
+	Vector3(1, 0, 1), Vector3(1, 0, -1), Vector3(-1, 0, 1), Vector3(-1, 0, -1),
+	Vector3(0, 1, 1), Vector3(0, 1, -1), Vector3(0, -1, 1), Vector3(0, -1, -1),
+	// 8 corner directions
+	Vector3(1, 1, 1), Vector3(1, 1, -1), Vector3(1, -1, 1), Vector3(1, -1, -1),
+	Vector3(-1, 1, 1), Vector3(-1, 1, -1), Vector3(-1, -1, 1), Vector3(-1, -1, -1)
+};
+static const int DIRECTION_BUCKET_COUNT = 26;
+
+static Vector3 g_direction_bucket_dirs[DIRECTION_BUCKET_COUNT];
+static bool g_direction_bucket_dirs_init = false;
+
+static int _direction_bucket_index(const Vector3 &p_dir_objspace) {
+	if (!g_direction_bucket_dirs_init) {
+		for (int i = 0; i < DIRECTION_BUCKET_COUNT; i++) {
+			g_direction_bucket_dirs[i] = DIRECTION_BUCKET_DIRS_RAW[i].normalized();
+		}
+		g_direction_bucket_dirs_init = true;
+	}
+	Vector3 n = p_dir_objspace.normalized();
+	int best = 0;
+	real_t best_dot = -2.0;
+	for (int i = 0; i < DIRECTION_BUCKET_COUNT; i++) {
+		real_t d = n.dot(g_direction_bucket_dirs[i]);
+		if (d > best_dot) {
+			best_dot = d;
+			best = i;
+		}
+	}
+	return best;
+}
+
 struct ShadowVolumeCacheEntry {
 	Transform transform;
 	Vector3 light_dir_objspace;
@@ -1303,6 +1347,12 @@ struct ShadowVolumeCacheEntry {
 	// unconditionally.
 	int ring_radial_segments = 0;
 	int ring_count = 0;
+	// godot-ports#52: -1 means "built for the exact per-frame light
+	// direction" (shadow_temporal_cache == NONE, today's default
+	// behavior); >= 0 means "built for direction bucket N's own
+	// representative direction, not the real per-frame one" -- see
+	// _direction_bucket_index()'s own comment for what this trades away.
+	int bucket_index = -1;
 	Vector<Vector3> vol_tris;
 };
 static Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry> shadow_volume_cache;
@@ -1494,22 +1544,45 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		// per frame) -- see the cache's own pruning comment further down
 		// for how a since-destroyed instance's stale entry gets cleared
 		// out rather than accumulating forever.
+		// godot-ports#52: direction-quantized caching. When selected, snap
+		// light_dir_objspace to the nearest of 26 fixed bucket directions
+		// and key/build the cache off the BUCKET's own representative
+		// direction instead of the real per-frame one -- trades a small,
+		// bounded silhouette error (using the nearest sampled direction
+		// instead of the true one) for a cache that stays hit across many
+		// consecutive frames of a rotating caster (as long as it hasn't
+		// crossed into a different bucket), instead of missing every
+		// single frame the way the NONE default does for anything that
+		// rotates. Unlike the transform-exact NONE mode, this doesn't
+		// depend on translation at all (silhouette shape is a pure
+		// function of object-space light direction, never position), so
+		// the cache key intentionally omits `transform`.
+		bool use_bucket = instance->shadow_temporal_cache == VS::SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED;
+		int bucket_idx = use_bucket ? _direction_bucket_index(light_dir_objspace) : -1;
+		Vector3 build_light_dir = use_bucket ? g_direction_bucket_dirs[bucket_idx] : light_dir_objspace;
+
 		Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry>::Element *CE = shadow_volume_cache.find(instance);
-		bool cache_hit = CE && CE->value().mesh == shadow_mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm && CE->value().ring_radial_segments == instance->shadow_ring_radial_segments && CE->value().ring_count == instance->shadow_ring_count;
+		bool cache_hit;
+		if (use_bucket) {
+			cache_hit = CE && CE->value().mesh == shadow_mesh && CE->value().algorithm == instance->shadow_silhouette_algorithm && CE->value().ring_radial_segments == instance->shadow_ring_radial_segments && CE->value().ring_count == instance->shadow_ring_count && CE->value().bucket_index == bucket_idx;
+		} else {
+			cache_hit = CE && CE->value().mesh == shadow_mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm && CE->value().ring_radial_segments == instance->shadow_ring_radial_segments && CE->value().ring_count == instance->shadow_ring_count && CE->value().bucket_index == -1;
+		}
 		if (!CE) {
 			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
 		if (!cache_hit) {
 			CE->value().vol_tris.resize(0);
 			for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
-				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, CE->value().vol_tris);
+				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, CE->value().vol_tris);
 			}
 			CE->value().mesh = shadow_mesh;
 			CE->value().transform = instance->transform;
-			CE->value().light_dir_objspace = light_dir_objspace;
+			CE->value().light_dir_objspace = build_light_dir;
 			CE->value().algorithm = instance->shadow_silhouette_algorithm;
 			CE->value().ring_radial_segments = instance->shadow_ring_radial_segments;
 			CE->value().ring_count = instance->shadow_ring_count;
+			CE->value().bucket_index = bucket_idx;
 
 			// TEMPORARY godot-ports#49/#50 correctness-verification instrumentation
 			// -- dumps the exact emitted shadow-volume triangle list every time
