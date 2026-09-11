@@ -609,6 +609,16 @@ static void _build_shadow_topology_if_needed(RasterizerStorageGLFF::Surface *p_s
 		p_surface->shadow_tri_normal_x.resize(tri_count);
 		p_surface->shadow_tri_normal_y.resize(tri_count);
 		p_surface->shadow_tri_normal_z.resize(tri_count);
+		// godot-ports#53: each triangle's normal LENGTH, cached here too
+		// (not just its direction) -- the temporal-coherence reuse-or-
+		// retest bound needs |n| every frame to compare a raw
+		// (unnormalized) dot product against a normalized-space margin,
+		// and recomputing sqrt(nx^2+ny^2+nz^2) per triangle per frame was
+		// measured to cost MORE than the exact per-triangle test it was
+		// meant to help avoid -- caching it once here (same lifecycle as
+		// the normal components themselves) makes the per-frame check
+		// pure multiply/compare, no sqrt.
+		p_surface->shadow_tri_normal_len.resize(tri_count);
 		for (int t = 0; t < tri_count; t++) {
 			const Vector3 &v0 = norm_vr[norm_tri_idx[t * 3 + 0]];
 			const Vector3 &v1 = norm_vr[norm_tri_idx[t * 3 + 1]];
@@ -617,6 +627,7 @@ static void _build_shadow_topology_if_needed(RasterizerStorageGLFF::Surface *p_s
 			p_surface->shadow_tri_normal_x.write[t] = n.x;
 			p_surface->shadow_tri_normal_y.write[t] = n.y;
 			p_surface->shadow_tri_normal_z.write[t] = n.z;
+			p_surface->shadow_tri_normal_len.write[t] = (float)n.length();
 		}
 	}
 
@@ -1013,7 +1024,25 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 	}
 }
 
-static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, Vector<Vector3> &r_triangles) {
+// godot-ports#53: temporal coherence. p_prev_faces_light/p_prev_light_dir
+// (both null unless the caller actually has a previous frame's state for
+// THIS exact instance+surface -- see the call site) enable a per-triangle
+// reuse-or-retest decision that is PROVEN correct, not a heuristic margin:
+// for a normalized triangle normal n and light directions L_old (last
+// frame) / L_new (this frame), Cauchy-Schwarz gives
+//   |dot(n, L_new) - dot(n, L_old)| == |dot(n, L_new - L_old)| <= |L_new - L_old|
+// so if |dot(n, L_old)| (the OLD classification's distance from the zero/
+// facing threshold) exceeds margin = |L_new - L_old| (the exact chord
+// distance between the two unit light directions), dot(n, L_new) is
+// PROVABLY on the same side of zero as dot(n, L_old) -- the cached
+// classification can be reused with zero risk of being wrong, at any
+// rotation speed. A fast rotation just makes margin large, so more
+// triangles fail this test and fall through to an exact per-triangle
+// retest -- degrading gracefully to the same cost as no coherence at all,
+// never silently wrong. No periodic full-recompute safety net is needed
+// because there is no accumulated drift to correct for: margin is
+// recomputed fresh from the actual frame-to-frame light delta every call.
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, const Vector<bool> *p_prev_faces_light, const Vector3 *p_prev_light_dir, Vector<bool> *r_out_faces_light, Vector<Vector3> &r_triangles) {
 	_build_shadow_topology_if_needed(p_surface);
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (tri_count == 0) {
@@ -1036,15 +1065,39 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 	const float *ny = p_surface->shadow_tri_normal_y.ptr();
 	const float *nz = p_surface->shadow_tri_normal_z.ptr();
 
-	// godot-ports#49: cluster-level cull, only when explicitly selected --
-	// see _build_shadow_clusters_if_needed()'s own comment for what each
-	// array holds and why the sin_alpha margin isn't optional. Any
-	// cluster that resolves definitively (light falls outside its ±alpha
-	// gray band around the 90 degree facing line) sets faces_light for
-	// its whole triangle range with zero per-triangle tests; ambiguous
-	// clusters fall back to exactly the same per-triangle dot product the
-	// FULL algorithm always uses.
-	if (p_algorithm == VS::SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE) {
+	// godot-ports#53: temporal coherence takes priority over the
+	// silhouette-algorithm axis when the caller actually has usable
+	// previous-frame state for this instance+surface (same mesh, same
+	// triangle count) -- see the proof in this function's own leading
+	// comment block for why this per-triangle reuse-or-retest is exact,
+	// not approximate.
+	if (p_prev_faces_light != nullptr && p_prev_faces_light->size() == tri_count && p_prev_light_dir != nullptr) {
+		Vector3 L_new = p_light_dir_objspace.normalized();
+		Vector3 L_old = p_prev_light_dir->normalized();
+		real_t dot_ll = CLAMP(L_new.dot(L_old), (real_t)-1.0, (real_t)1.0);
+		real_t margin = Math::sqrt(MAX((real_t)0.0, (real_t)2.0 - (real_t)2.0 * dot_ll)); // exact chord distance |L_new - L_old|
+		const float *nlen = p_surface->shadow_tri_normal_len.ptr();
+		for (int t = 0; t < tri_count; t++) {
+			// Compare the RAW (unnormalized) dot against margin*|n| instead
+			// of dividing the dot by |n| -- avoids a per-triangle sqrt
+			// entirely (|n| is precomputed once at build time, see
+			// shadow_tri_normal_len's own comment); mathematically
+			// identical to the normalized-space comparison since |n| > 0.
+			real_t len = nlen[t];
+			if (len > CMP_EPSILON) {
+				real_t d_old_raw = nx[t] * L_old.x + ny[t] * L_old.y + nz[t] * L_old.z;
+				if (Math::abs(d_old_raw) > margin * len) {
+					// Provably can't have crossed zero since last frame --
+					// reuse the cached classification directly, no retest.
+					faces_light.write[t] = (*p_prev_faces_light)[t];
+					continue;
+				}
+			}
+			// Degenerate normal, or within the provable-uncertainty band --
+			// exact retest against the real per-frame light direction.
+			faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
+		}
+	} else if (p_algorithm == VS::SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE) {
 		_build_shadow_clusters_if_needed(p_surface);
 		const int *order = p_surface->shadow_cluster_tri_order.ptr();
 		for (int c = 0; c < 6; c++) {
@@ -1177,6 +1230,13 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 		for (int t = 0; t < tri_count; t++) {
 			faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
 		}
+	}
+
+	// godot-ports#53: hand the finished classification back to the caller
+	// so it can be cached as next frame's "previous" state, regardless of
+	// which branch above actually built it.
+	if (r_out_faces_light != nullptr) {
+		*r_out_faces_light = faces_light;
 	}
 
 	Vector3 extrude = -p_light_dir_objspace.normalized() * p_extrude_distance;
@@ -1354,6 +1414,12 @@ struct ShadowVolumeCacheEntry {
 	// _direction_bucket_index()'s own comment for what this trades away.
 	int bucket_index = -1;
 	Vector<Vector3> vol_tris;
+	// godot-ports#53: last frame's per-surface light-facing classification,
+	// only populated/consumed when shadow_temporal_cache ==
+	// TEMPORAL_COHERENCE. Indexed [surface_index][triangle_index]. Reset
+	// (cleared) whenever the mesh changes, so a stale array from a
+	// different mesh/surface-count can never be misread against new data.
+	Vector<Vector<bool>> temporal_faces_light;
 };
 static Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry> shadow_volume_cache;
 static const int SHADOW_VOLUME_CACHE_MAX_ENTRIES = 256;
@@ -1572,9 +1638,35 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
 		if (!cache_hit) {
+			// godot-ports#53: only meaningful if the previous entry is for
+			// the SAME mesh with the SAME surface count -- a mesh swap
+			// invalidates temporal state the same way it invalidates
+			// everything else cached here. Read the previous light
+			// direction BEFORE it gets overwritten below.
+			bool use_coherence = instance->shadow_temporal_cache == VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE && CE->value().mesh == shadow_mesh && CE->value().temporal_faces_light.size() == shadow_mesh->surfaces.size();
+			Vector3 prev_light_dir = CE->value().light_dir_objspace;
+			Vector<Vector<bool>> new_faces_light;
+			bool want_faces_light_out = instance->shadow_temporal_cache == VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE;
+			if (want_faces_light_out) {
+				new_faces_light.resize(shadow_mesh->surfaces.size());
+			}
+
 			CE->value().vol_tris.resize(0);
 			for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
-				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, CE->value().vol_tris);
+				const Vector<bool> *prev_fl = (use_coherence && s < CE->value().temporal_faces_light.size()) ? &CE->value().temporal_faces_light[s] : nullptr;
+				const Vector3 *prev_ld = use_coherence ? &prev_light_dir : nullptr;
+				Vector<bool> out_fl_local;
+				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, prev_fl, prev_ld, want_faces_light_out ? &out_fl_local : nullptr, CE->value().vol_tris);
+				if (want_faces_light_out) {
+					new_faces_light.write[s] = out_fl_local;
+				}
+			}
+			if (want_faces_light_out) {
+				CE->value().temporal_faces_light = new_faces_light;
+			} else if (CE->value().temporal_faces_light.size() > 0) {
+				// Switched away from TEMPORAL_COHERENCE -- drop stale state
+				// rather than let it linger unused.
+				CE->value().temporal_faces_light.clear();
 			}
 			CE->value().mesh = shadow_mesh;
 			CE->value().transform = instance->transform;

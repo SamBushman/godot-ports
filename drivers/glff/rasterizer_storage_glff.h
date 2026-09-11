@@ -689,6 +689,11 @@ public:
 		Vector<float> shadow_tri_normal_x;
 		Vector<float> shadow_tri_normal_y;
 		Vector<float> shadow_tri_normal_z;
+		// godot-ports#53: |shadow_tri_normal_{x,y,z}| per triangle, cached
+		// once here so the temporal-coherence per-frame check never needs
+		// to compute a sqrt of its own -- see rasterizer_scene_glff.cpp's
+		// build-site comment.
+		Vector<float> shadow_tri_normal_len;
 
 		// godot-ports#48 phase 2: flattened, O(1)-indexable copy of each
 		// edge's owner triangles, parallel arrays sized edge_count.
