@@ -1033,11 +1033,38 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 // never silently wrong. No periodic full-recompute safety net is needed
 // because there is no accumulated drift to correct for: margin is
 // recomputed fresh from the actual frame-to-frame light delta every call.
-static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, const Vector<bool> *p_prev_faces_light, const Vector3 *p_prev_light_dir, Vector<bool> *r_out_faces_light, Vector<Vector3> &r_triangles) {
+// godot-ports#55 perf fix: the caller used to reset r_triangles between
+// frames via `vol_tris.resize(0)`, which for CowData means "free the
+// buffer entirely" (see core/cowdata.h's resize()), not "keep capacity,
+// reset size" -- so any animating caster's persistent per-instance
+// vol_tris buffer was regrowing from a null pointer every single frame
+// (~14 reallocations, doubling from 0 up to its real size) instead of
+// settling into a stable buffer reused frame to frame. Measured ~71%
+// faster emission-phase time and ~27% less total per-frame shadow cost
+// with the fix (see #55 for the full before/after breakdown). Writes now
+// go through r_triangles.write[(*r_write_idx)++] = ... at fixed indices
+// instead of push_back(), into a buffer the caller guarantees is already
+// sized to this call's real worst case (24 verts/triangle -- 2 cap tris
+// + up to 3 silhouette-edge quads, 6 verts each -- see the ensure-
+// capacity block just below), so nothing in this function ever grows/
+// reallocates r_triangles itself.
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, const Vector<bool> *p_prev_faces_light, const Vector3 *p_prev_light_dir, Vector<bool> *r_out_faces_light, Vector<Vector3> &r_triangles, int *r_write_idx) {
 	_build_shadow_topology_if_needed(p_surface);
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (tri_count == 0) {
 		return;
+	}
+
+	// Worst case: every triangle lit (2 cap tris, 6 verts) and every one
+	// of its 3 edges a silhouette wall (2 tris each, 6 verts) -- 24 verts/
+	// triangle, never exceeded regardless of real light direction. Only
+	// grows the buffer (never shrinks it) -- once an instance's proxy
+	// mesh has been built once, every later frame for the same instance
+	// finds the buffer already big enough and this is a no-op check, not
+	// a real allocation.
+	int needed = *r_write_idx + tri_count * 24;
+	if (r_triangles.size() < needed) {
+		r_triangles.resize(needed);
 	}
 
 	PoolVector<Vector3>::Read vr = p_surface->vertices.read();
@@ -1204,15 +1231,15 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 		Vector3 vp0 = vr[tri_idx[t * 3 + 0]], vp1 = vr[tri_idx[t * 3 + 1]], vp2 = vr[tri_idx[t * 3 + 2]];
 
 		// Front cap: the light-facing triangle itself, unmodified winding.
-		r_triangles.push_back(vp0);
-		r_triangles.push_back(vp1);
-		r_triangles.push_back(vp2);
+		r_triangles.write[(*r_write_idx)++] = vp0;
+		r_triangles.write[(*r_write_idx)++] = vp1;
+		r_triangles.write[(*r_write_idx)++] = vp2;
 		// Back cap: the same triangle extruded, winding REVERSED so it
 		// faces the opposite way once translated behind the object --
 		// this is what closes the volume correctly for z-pass counting.
-		r_triangles.push_back(vp0 + extrude);
-		r_triangles.push_back(vp2 + extrude);
-		r_triangles.push_back(vp1 + extrude);
+		r_triangles.write[(*r_write_idx)++] = vp0 + extrude;
+		r_triangles.write[(*r_write_idx)++] = vp2 + extrude;
+		r_triangles.write[(*r_write_idx)++] = vp1 + extrude;
 	}
 
 	// godot-ports#48 phase 2: silhouette walls. Two prior restructurings of
@@ -1280,12 +1307,12 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 			// Side quad (split into 2 triangles), wound to match the front
 			// cap's own directed-edge sense so the whole volume's outward
 			// winding stays consistent.
-			r_triangles.push_back(va);
-			r_triangles.push_back(vb);
-			r_triangles.push_back(vb_ext);
-			r_triangles.push_back(va);
-			r_triangles.push_back(vb_ext);
-			r_triangles.push_back(va_ext);
+			r_triangles.write[(*r_write_idx)++] = va;
+			r_triangles.write[(*r_write_idx)++] = vb;
+			r_triangles.write[(*r_write_idx)++] = vb_ext;
+			r_triangles.write[(*r_write_idx)++] = va;
+			r_triangles.write[(*r_write_idx)++] = vb_ext;
+			r_triangles.write[(*r_write_idx)++] = va_ext;
 		}
 	}
 }
@@ -1367,7 +1394,14 @@ struct ShadowVolumeCacheEntry {
 	// representative direction, not the real per-frame one" -- see
 	// _direction_bucket_index()'s own comment for what this trades away.
 	int bucket_index = -1;
+	// godot-ports#55: vol_tris is a persistent scratch buffer that only
+	// ever GROWS (see the call site's own comment for why) -- vol_tris.
+	// size() is its allocated capacity, not how much of it is actually
+	// valid this frame. vol_tris_valid (a vertex count, same units
+	// .size() used to be trusted for) is the real "how much to draw"
+	// value now.
 	Vector<Vector3> vol_tris;
+	int vol_tris_valid = 0;
 	// godot-ports#53: last frame's per-surface light-facing classification,
 	// only populated/consumed when shadow_temporal_cache ==
 	// TEMPORAL_COHERENCE. Indexed [surface_index][triangle_index]. Reset
@@ -1605,16 +1639,29 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 				new_faces_light.resize(shadow_mesh->surfaces.size());
 			}
 
-			CE->value().vol_tris.resize(0);
+			// godot-ports#55: used to be `CE->value().vol_tris.resize(0);`
+			// here, which for CowData means "free the buffer", not "keep
+			// the allocation, reset the logical size" (see
+			// _build_shadow_volume_triangles()'s own leading comment).
+			// That forced every animating caster's persistent per-instance
+			// vol_tris buffer to regrow FROM NULL every single frame via
+			// ~14 reallocations (doubling from 0 up to ~8-16KB) instead of
+			// settling into a stable buffer reused frame to frame. Now:
+			// don't touch vol_tris' allocation at all here -- just reset
+			// the write cursor, and let _build_shadow_volume_triangles's
+			// own ensure-capacity check (grow-only, sized to that call's
+			// real worst case) decide whether anything needs to grow.
+			int write_idx = 0;
 			for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
 				const Vector<bool> *prev_fl = (use_coherence && s < CE->value().temporal_faces_light.size()) ? &CE->value().temporal_faces_light[s] : nullptr;
 				const Vector3 *prev_ld = use_coherence ? &prev_light_dir : nullptr;
 				Vector<bool> out_fl_local;
-				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, prev_fl, prev_ld, want_faces_light_out ? &out_fl_local : nullptr, CE->value().vol_tris);
+				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, prev_fl, prev_ld, want_faces_light_out ? &out_fl_local : nullptr, CE->value().vol_tris, &write_idx);
 				if (want_faces_light_out) {
 					new_faces_light.write[s] = out_fl_local;
 				}
 			}
+			CE->value().vol_tris_valid = write_idx;
 			if (want_faces_light_out) {
 				CE->value().temporal_faces_light = new_faces_light;
 			} else if (CE->value().temporal_faces_light.size() > 0) {
@@ -1631,7 +1678,8 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			CE->value().bucket_index = bucket_idx;
 		}
 		const Vector<Vector3> &vol_tris = CE->value().vol_tris;
-		if (vol_tris.size() == 0) {
+		int vol_tris_valid = CE->value().vol_tris_valid;
+		if (vol_tris_valid == 0) {
 			continue;
 		}
 
@@ -1645,11 +1693,11 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		glEnable(GL_CULL_FACE);
 		glCullFace(GL_BACK);
 		glStencilOp(GL_KEEP, GL_KEEP, GL_INCR);
-		glDrawArrays(GL_TRIANGLES, 0, vol_tris.size());
+		glDrawArrays(GL_TRIANGLES, 0, vol_tris_valid);
 
 		glCullFace(GL_FRONT);
 		glStencilOp(GL_KEEP, GL_KEEP, GL_DECR);
-		glDrawArrays(GL_TRIANGLES, 0, vol_tris.size());
+		glDrawArrays(GL_TRIANGLES, 0, vol_tris_valid);
 
 		glDisable(GL_CULL_FACE);
 		glPopMatrix();
