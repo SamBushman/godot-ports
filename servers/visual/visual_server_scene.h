@@ -875,6 +875,7 @@ public:
 	virtual void instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, VS::ShadowSilhouetteAlgorithm p_algorithm);
 	virtual void instance_geometry_set_shadow_temporal_cache(RID p_instance, VS::ShadowTemporalCache p_cache);
 	virtual void instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh);
+	virtual void instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings);
 
 	_FORCE_INLINE_ void _update_instance(Instance *p_instance);
 	_FORCE_INLINE_ void _update_instance_aabb(Instance *p_instance);

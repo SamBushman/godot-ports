@@ -127,6 +127,16 @@ public:
 		VS::ShadowTemporalCache shadow_temporal_cache;
 		RID shadow_lod_proxy_mesh; // godot-ports#51: explicit proxy mesh RID; invalid == auto-generate/cache one when shadow_geometry_source == SHADOW_GEOMETRY_SOURCE_LOD_PROXY
 
+		// godot-ports#50: real ring/radial-segment counts for a SphereMesh/
+		// CylinderMesh caster, pushed from scene/3d/mesh_instance.cpp (the
+		// only place that still has the live Resource object, not just baked
+		// Surface arrays). 0/0 (the default) means "not a recognized
+		// primitive with known ring topology" -- GLFF's RING_SEGMENT
+		// algorithm falls back to FULL whenever this is 0/0, it never
+		// guesses ring structure from raw geometry.
+		int shadow_ring_radial_segments;
+		int shadow_ring_count;
+
 		//fit in 32 bits
 		bool mirror : 1;
 		bool receive_shadows : 1;
@@ -163,6 +173,8 @@ public:
 			shadow_geometry_source = VS::SHADOW_GEOMETRY_SOURCE_RENDER_MESH;
 			shadow_silhouette_algorithm = VS::SHADOW_SILHOUETTE_ALGORITHM_FULL;
 			shadow_temporal_cache = VS::SHADOW_TEMPORAL_CACHE_NONE;
+			shadow_ring_radial_segments = 0;
+			shadow_ring_count = 0;
 			receive_shadows = true;
 			visible = true;
 			depth_layer = 0;

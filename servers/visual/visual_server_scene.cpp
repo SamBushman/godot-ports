@@ -1895,6 +1895,14 @@ void VisualServerScene::instance_geometry_set_shadow_lod_proxy(RID p_instance, R
 
 	instance->shadow_lod_proxy_mesh = p_proxy_mesh;
 }
+
+void VisualServerScene::instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_ring_radial_segments = p_radial_segments;
+	instance->shadow_ring_count = p_rings;
+}
 void VisualServerScene::instance_geometry_set_material_override(RID p_instance, RID p_material) {
 	Instance *instance = instance_owner.get(p_instance);
 	ERR_FAIL_COND(!instance);

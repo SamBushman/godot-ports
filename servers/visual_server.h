@@ -1025,6 +1025,8 @@ public:
 	virtual void instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, ShadowSilhouetteAlgorithm p_algorithm) = 0;
 	virtual void instance_geometry_set_shadow_temporal_cache(RID p_instance, ShadowTemporalCache p_cache) = 0;
 	virtual void instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh) = 0;
+	// godot-ports#50: (0, 0) means "not a recognized ring-topology primitive" -- see rasterizer.h's InstanceBase field comment.
+	virtual void instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings) = 0;
 
 	/* CANVAS (2D) */
 

@@ -2190,6 +2190,7 @@ void VisualServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_silhouette_algorithm", "instance", "algorithm"), &VisualServer::instance_geometry_set_shadow_silhouette_algorithm);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_temporal_cache", "instance", "cache"), &VisualServer::instance_geometry_set_shadow_temporal_cache);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_lod_proxy", "instance", "proxy_mesh"), &VisualServer::instance_geometry_set_shadow_lod_proxy);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_ring_topology", "instance", "radial_segments", "rings"), &VisualServer::instance_geometry_set_shadow_ring_topology);
 
 	ClassDB::bind_method(D_METHOD("instances_cull_aabb", "aabb", "scenario"), &VisualServer::_instances_cull_aabb_bind, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("instances_cull_ray", "from", "to", "scenario"), &VisualServer::_instances_cull_ray_bind, DEFVAL(RID()));

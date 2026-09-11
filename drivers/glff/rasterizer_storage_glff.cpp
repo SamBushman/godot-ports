@@ -396,6 +396,13 @@ void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
 	// point -- reset it here too rather than only where it's built.
 	surface->shadow_cluster_built = false;
 	surface->shadow_cluster_tri_order.clear();
+	// godot-ports#50: same invalidation point for the ring-cull cache.
+	surface->shadow_ring_built = false;
+	surface->shadow_ring_tri_start.clear();
+	surface->shadow_ring_tri_count.clear();
+	surface->shadow_ring_min_cos_from_y.clear();
+	surface->shadow_ring_max_cos_from_y.clear();
+	surface->shadow_ring_has_degenerate.clear();
 
 	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
 	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;

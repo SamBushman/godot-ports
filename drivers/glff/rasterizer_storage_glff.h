@@ -734,6 +734,54 @@ public:
 		int shadow_cluster_tri_count[6] = { 0, 0, 0, 0, 0, 0 };
 		Vector3 shadow_cluster_dir[6];
 		float shadow_cluster_sin_alpha[6] = { 0, 0, 0, 0, 0, 0 };
+
+		// godot-ports#50: ring-level coarse cull for SphereMesh/CylinderMesh
+		// content, built lazily and only when an instance both selects
+		// RING_SEGMENT and has real ring/radial-segment counts pushed down
+		// from scene/3d/mesh_instance.cpp (see rasterizer.h's InstanceBase
+		// field comment) -- keyed on that (radial_segments, rings) pair so a
+		// mismatched re-request (misconfigured content) rebuilds instead of
+		// silently reusing a stale/wrong ring layout.
+		//
+		// Godot's own SphereMesh/CylinderMesh generator (scene/resources/
+		// primitive_meshes.cpp, create_mesh_array()) emits ALL side
+		// triangles first, ring-major (ring 0's radial_segments*2
+		// triangles, then ring 1's, ...), always around the mesh's local
+		// +Y axis with each ring's vertex normals sharing one fixed
+		// angle-from-Y (only their azimuth around Y varies within a ring)
+		// -- read directly from that source, not guessed. shadow_ring_count
+		// == rings+1 side rings; CylinderMesh's optional top/bottom cap fan
+		// triangles (appended after the side triangles when top/bottom
+		// radius > 0) fall into one synthetic trailing "ring" that always
+		// takes the per-triangle fallback path -- small (radial_segments
+		// triangles each) and not worth special-casing.
+		bool shadow_ring_built = false;
+		int shadow_ring_built_for_radial_segments = 0;
+		int shadow_ring_built_for_rings = 0;
+		int shadow_ring_actual_count = 0; // side rings + 1 trailing catch-all for any leftover (cap) triangles
+		Vector<int> shadow_ring_tri_start;
+		Vector<int> shadow_ring_tri_count;
+		// Per ring: min/max of (unnormalized-normal).y / |unnormalized-normal|
+		// among that ring's real triangle face normals -- i.e. the actual
+		// (not assumed-exact) angular spread from +Y this ring's geometry
+		// exhibits, used for the closed-form per-frame bound below instead
+		// of trusting an idealized analytic ring shape.
+		Vector<float> shadow_ring_min_cos_from_y;
+		Vector<float> shadow_ring_max_cos_from_y;
+		// True for a ring containing at least one degenerate (zero-area,
+		// zero-length-normal) triangle -- always the two pole rings only,
+		// where consecutive latitude rows collapse to a single point (see
+		// create_mesh_array()'s own row-0/row-(rings+1) generation). A
+		// degenerate triangle's dot with ANY light is exactly 0, so FULL's
+		// exact test (`dot > 0`) always resolves it to "not lit" --
+		// blanket-assigning a coarsely-resolved ring's verdict to every
+		// triangle in it would incorrectly mark these as lit whenever the
+		// ring resolves "definitely lit". Rather than track which specific
+		// triangles are degenerate (rare, at most 2 rings, not worth the
+		// bookkeeping), a ring flagged here just always takes the
+		// per-triangle fallback path -- negligible cost given how few
+		// rings this ever applies to.
+		Vector<bool> shadow_ring_has_degenerate;
 	};
 
 	struct Mesh : public RID_Data {

@@ -36,6 +36,7 @@
 #include "physics_body.h"
 #include "scene/resources/material.h"
 #include "scene/resources/merging_tool.h"
+#include "scene/resources/primitive_meshes.h"
 #include "scene/scene_string_names.h"
 #include "servers/visual/visual_server_globals.h"
 #include "skeleton.h"
@@ -362,6 +363,36 @@ void MeshInstance::_initialize_skinning(bool p_force_reset, bool p_call_attach_s
 	RID render_mesh = software_skinning ? software_skinning->mesh_instance->get_rid() : mesh->get_rid();
 	if (update_mesh || (render_mesh != get_base())) {
 		set_base(render_mesh);
+
+		// godot-ports#50: the GLFF ring/segment shadow-silhouette culling
+		// strategy needs to know a mesh's real ring/radial-segment topology,
+		// which only exists as a property on the *resource* (SphereMesh/
+		// CylinderMesh) -- once baked into raw Surface vertex/index arrays
+		// at the RasterizerStorage level, that structure is gone. This is
+		// the one place in the engine that still has both the live Resource
+		// object (to detect the type + read its real segment/ring counts)
+		// and a valid instance RID (to push the hint down) at the same
+		// time, so it's pushed here rather than invented at the rasterizer
+		// level. Any non-SphereMesh/CylinderMesh mesh (or one wrapped in
+		// software skinning) explicitly clears the hint to (0, 0) -- GLFF
+		// silently falls back to the Full algorithm rather than guessing at
+		// ring structure for content it doesn't actually know the shape of.
+		{
+			int ring_radial_segments = 0;
+			int ring_count = 0;
+			if (!software_skinning) {
+				SphereMesh *sm = Object::cast_to<SphereMesh>(mesh.ptr());
+				CylinderMesh *cm = Object::cast_to<CylinderMesh>(mesh.ptr());
+				if (sm) {
+					ring_radial_segments = sm->get_radial_segments();
+					ring_count = sm->get_rings();
+				} else if (cm) {
+					ring_radial_segments = cm->get_radial_segments();
+					ring_count = cm->get_rings();
+				}
+			}
+			VS::get_singleton()->instance_geometry_set_shadow_ring_topology(get_instance(), ring_radial_segments, ring_count);
+		}
 
 		// Update instance materials after switching mesh.
 		int surface_count = mesh->get_surface_count();

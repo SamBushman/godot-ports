@@ -829,7 +829,191 @@ static void _build_shadow_clusters_if_needed(RasterizerStorageGLFF::Surface *p_s
 	}
 }
 
-static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, Vector<Vector3> &r_triangles) {
+// godot-ports#50: exact closed-form bound for dot(n, p_light_dir_objspace)
+// over every unit normal n whose angle from the mesh's local +Y axis lies
+// in [p_beta_lo, p_beta_hi] and whose azimuth around Y is completely free
+// (a real ring covers the full 2*PI azimuth by construction -- see
+// create_mesh_array() in scene/resources/primitive_meshes.cpp).
+//
+// Not a heuristic/sampled bound -- exact, derived as follows. Writing a
+// candidate normal as n = (sin(beta)*cos(phi), cos(beta), sin(beta)*sin(phi))
+// and L = (lx, ly, lz), with lxz = sqrt(lx^2+lz^2) and phi_L = atan2(lz,lx):
+//   dot(n,L) = ly*cos(beta) + sin(beta)*lxz*cos(phi - phi_L)
+// As phi sweeps the ring's full 2*PI, cos(phi-phi_L) sweeps [-1,1], so for
+// a FIXED beta:
+//   min over phi = ly*cos(beta) - lxz*sin(beta) = R*cos(beta + delta)
+//   max over phi = ly*cos(beta) + lxz*sin(beta) = R*cos(beta - delta)
+// where R = sqrt(ly^2+lxz^2) = |L| and delta = atan2(lxz, ly) (this is
+// where cos(delta)=ly/R, sin(delta)=lxz/R comes from). These are TWO
+// DIFFERENT cosines of beta (opposite-signed phase shift) -- min and max
+// are each then just that cosine's own min/max over beta in
+// [p_beta_lo, p_beta_hi], handled exactly below (endpoints plus any
+// PI/2*PI crossing inside the range), not sampled/approximated.
+static float _cos_range_extreme(float p_lo, float p_hi, bool p_want_max) {
+	float c_lo = Math::cos((double)p_lo);
+	float c_hi = Math::cos((double)p_hi);
+	float result = p_want_max ? MAX(c_lo, c_hi) : MIN(c_lo, c_hi);
+	if (p_want_max) {
+		// Does [p_lo, p_hi] contain a point where theta is a multiple of
+		// 2*PI (cos == +1, the unconstrained max)?
+		double k = Math::floor((double)p_lo / (2.0 * Math_PI));
+		double candidate = k * 2.0 * Math_PI;
+		if (candidate < (double)p_lo) {
+			candidate += 2.0 * Math_PI;
+		}
+		if (candidate <= (double)p_hi) {
+			result = 1.0f;
+		}
+	} else {
+		// Does it contain a point where theta is an odd multiple of PI
+		// (cos == -1, the unconstrained min)?
+		double k = Math::floor(((double)p_lo - Math_PI) / (2.0 * Math_PI));
+		double candidate = Math_PI + k * 2.0 * Math_PI;
+		if (candidate < (double)p_lo) {
+			candidate += 2.0 * Math_PI;
+		}
+		if (candidate <= (double)p_hi) {
+			result = -1.0f;
+		}
+	}
+	return result;
+}
+
+static void _ring_dot_bounds(float p_beta_lo, float p_beta_hi, const Vector3 &p_light_dir_objspace, float &r_min_dot, float &r_max_dot) {
+	float lxz = Math::sqrt(p_light_dir_objspace.x * p_light_dir_objspace.x + p_light_dir_objspace.z * p_light_dir_objspace.z);
+	float ly = p_light_dir_objspace.y;
+	float R = Math::sqrt(lxz * lxz + ly * ly);
+	if (R < CMP_EPSILON) {
+		// Degenerate: light direction has ~no component in this mesh's own
+		// (Y, XZ-radius) plane at all -- vanishingly rare, but handle it
+		// safely rather than divide by (near-)zero. Every dot is ~0 here;
+		// report full ambiguity so the caller always falls back per-triangle.
+		r_min_dot = -1.0f;
+		r_max_dot = 1.0f;
+		return;
+	}
+	float delta = Math::atan2(lxz, ly);
+	// min uses R*cos(beta + delta); max uses R*cos(beta - delta) -- two
+	// DIFFERENT phase-shifted ranges of beta, not the same one.
+	float cmin = _cos_range_extreme(p_beta_lo + delta, p_beta_hi + delta, false);
+	float cmax = _cos_range_extreme(p_beta_lo - delta, p_beta_hi - delta, true);
+	r_min_dot = R * cmin;
+	r_max_dot = R * cmax;
+}
+
+// godot-ports#50: ring-level coarse cull build, lazy + keyed on the
+// (radial_segments, rings) pair actually requested (see the field comment
+// on RasterizerStorageGLFF::Surface::shadow_ring_built_for_* for why).
+// Requires the topology cache (for tri_count + cached triangle normals)
+// but is otherwise independent of the #49 cluster cache.
+static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surface, int p_radial_segments, int p_rings) {
+	_build_shadow_topology_if_needed(p_surface);
+	if (p_surface->shadow_ring_built && p_surface->shadow_ring_built_for_radial_segments == p_radial_segments && p_surface->shadow_ring_built_for_rings == p_rings) {
+		return;
+	}
+	p_surface->shadow_ring_built = true;
+	p_surface->shadow_ring_built_for_radial_segments = p_radial_segments;
+	p_surface->shadow_ring_built_for_rings = p_rings;
+	p_surface->shadow_ring_actual_count = 0;
+	p_surface->shadow_ring_tri_start.clear();
+	p_surface->shadow_ring_tri_count.clear();
+	p_surface->shadow_ring_min_cos_from_y.clear();
+	p_surface->shadow_ring_max_cos_from_y.clear();
+
+	int tri_count = p_surface->shadow_tri_indices.size() / 3;
+	if (p_radial_segments <= 0 || p_rings < 0 || tri_count == 0) {
+		return; // no real ring topology declared -- leave empty, caller falls back to FULL
+	}
+
+	int side_rings = p_rings + 1; // create_mesh_array() emits rings+1 latitude bands
+	int tris_per_ring = 2 * p_radial_segments;
+	int side_tri_count = tris_per_ring * side_rings;
+	if (side_tri_count <= 0 || side_tri_count > tri_count) {
+		// Doesn't match this surface's real triangle count -- misconfigured
+		// (radial_segments/rings pushed don't describe the actual mesh).
+		// Leave the ring cache empty rather than reading past real data;
+		// caller falls back to FULL for the whole surface.
+		return;
+	}
+
+	int total_rings = side_rings + ((tri_count > side_tri_count) ? 1 : 0); // + 1 synthetic catch-all for any trailing (cap) triangles
+	p_surface->shadow_ring_actual_count = total_rings;
+	// TEMPORARY godot-ports#50 sanity-check print -- confirms the ring
+	// topology hint actually reached here and produced a real, non-empty
+	// ring cache (vs. silently falling back), gated on the same
+	// GLFF_SHADOW_DUMP env var as the #49/#50 dump instrument. Revert
+	// alongside that instrument once this family's verification is done.
+	if (getenv("GLFF_SHADOW_DUMP")) {
+		fprintf(stderr, "GLFF_RING_BUILD radial_segments=%d rings=%d side_rings=%d total_rings=%d tri_count=%d\n", p_radial_segments, p_rings, side_rings, total_rings, tri_count);
+	}
+	p_surface->shadow_ring_tri_start.resize(total_rings);
+	p_surface->shadow_ring_tri_count.resize(total_rings);
+	p_surface->shadow_ring_min_cos_from_y.resize(total_rings);
+	p_surface->shadow_ring_max_cos_from_y.resize(total_rings);
+	p_surface->shadow_ring_has_degenerate.resize(total_rings);
+
+	const float *nx = p_surface->shadow_tri_normal_x.ptr();
+	const float *ny = p_surface->shadow_tri_normal_y.ptr();
+	const float *nz = p_surface->shadow_tri_normal_z.ptr();
+
+	for (int r = 0; r < side_rings; r++) {
+		int start = r * tris_per_ring;
+		p_surface->shadow_ring_tri_start.write[r] = start;
+		p_surface->shadow_ring_tri_count.write[r] = tris_per_ring;
+		float min_cy = 1.0f, max_cy = -1.0f;
+		bool has_degenerate = false;
+		for (int i = 0; i < tris_per_ring; i++) {
+			int t = start + i;
+			Vector3 n(nx[t], ny[t], nz[t]);
+			real_t len = n.length();
+			if (len > CMP_EPSILON) {
+				float cy = (float)(n.y / len);
+				if (cy < min_cy) {
+					min_cy = cy;
+				}
+				if (cy > max_cy) {
+					max_cy = cy;
+				}
+			} else {
+				// godot-ports#50 bugfix: a zero-area triangle (both pole
+				// rings have half their triangles collapse to this, per
+				// create_mesh_array()'s own row-0/row-(rings+1) generation)
+				// has dot(normal, L) == 0 for ANY light direction under
+				// FULL's exact test (`> 0.0f` is false) -- it can never
+				// legitimately be swept into a ring's "definitely lit"
+				// blanket verdict. Flagging the whole ring for per-triangle
+				// fallback is simpler and safer than tracking exactly
+				// which triangle indices are degenerate.
+				has_degenerate = true;
+			}
+		}
+		if (min_cy > max_cy) {
+			// Every triangle in this ring was degenerate (zero-area) --
+			// can't bound anything real, report full ambiguity (safe).
+			min_cy = -1.0f;
+			max_cy = 1.0f;
+		}
+		p_surface->shadow_ring_min_cos_from_y.write[r] = min_cy;
+		p_surface->shadow_ring_max_cos_from_y.write[r] = max_cy;
+		p_surface->shadow_ring_has_degenerate.write[r] = has_degenerate;
+	}
+
+	if (tri_count > side_tri_count) {
+		// Synthetic catch-all bucket for cap/leftover triangles this ring
+		// model doesn't describe -- [-1, 1] cos-from-Y range always spans
+		// the full possible bound, so the per-frame test below always
+		// treats it as ambiguous and falls back to exact per-triangle,
+		// with zero special-casing needed at that call site.
+		int last = side_rings;
+		p_surface->shadow_ring_tri_start.write[last] = side_tri_count;
+		p_surface->shadow_ring_tri_count.write[last] = tri_count - side_tri_count;
+		p_surface->shadow_ring_min_cos_from_y.write[last] = -1.0f;
+		p_surface->shadow_ring_max_cos_from_y.write[last] = 1.0f;
+		p_surface->shadow_ring_has_degenerate.write[last] = false; // irrelevant -- [-1,1] always falls back anyway
+	}
+}
+
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, Vector<Vector3> &r_triangles) {
 	_build_shadow_topology_if_needed(p_surface);
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (tri_count == 0) {
@@ -894,10 +1078,102 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 				}
 			}
 		}
+	} else if (p_algorithm == VS::SHADOW_SILHOUETTE_ALGORITHM_RING_SEGMENT && p_ring_radial_segments > 0) {
+		// godot-ports#50: ring-level coarse cull, only for content with a
+		// real declared ring/radial-segment topology (SphereMesh/
+		// CylinderMesh -- see mesh_instance.cpp's push site). If the
+		// requested topology doesn't actually match this surface's real
+		// triangle count, _build_shadow_rings_if_needed() leaves the ring
+		// cache empty (shadow_ring_actual_count == 0) and this whole branch
+		// safely degrades to the plain per-triangle test below.
+		_build_shadow_rings_if_needed(p_surface, p_ring_radial_segments, p_ring_count);
+		int ring_n = p_surface->shadow_ring_actual_count;
+		if (ring_n == 0) {
+			for (int t = 0; t < tri_count; t++) {
+				faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
+			}
+		} else {
+			for (int r = 0; r < ring_n; r++) {
+				int start = p_surface->shadow_ring_tri_start[r];
+				int count = p_surface->shadow_ring_tri_count[r];
+
+				if (p_surface->shadow_ring_has_degenerate[r]) {
+					// godot-ports#50 bugfix: never blanket-resolve a ring
+					// containing a degenerate triangle (both pole rings) --
+					// see the field comment on shadow_ring_has_degenerate.
+					for (int i = start; i < start + count; i++) {
+						faces_light.write[i] = (nx[i] * p_light_dir_objspace.x + ny[i] * p_light_dir_objspace.y + nz[i] * p_light_dir_objspace.z) > 0.0f;
+					}
+					continue;
+				}
+
+				float min_cy = p_surface->shadow_ring_min_cos_from_y[r];
+				float max_cy = p_surface->shadow_ring_max_cos_from_y[r];
+				// cos is decreasing on [0, PI] -- max_cy (smallest angle
+				// from +Y) maps to the SMALLER beta bound, min_cy to the larger.
+				float beta_lo = Math::acos(CLAMP(max_cy, -1.0f, 1.0f));
+				float beta_hi = Math::acos(CLAMP(min_cy, -1.0f, 1.0f));
+				float min_dot, max_dot;
+				_ring_dot_bounds(beta_lo, beta_hi, p_light_dir_objspace, min_dot, max_dot);
+
+				// TEMPORARY godot-ports#50 self-check: scan this ring's REAL
+				// triangles and compare against the closed-form bound -- if
+				// the bound isn't actually conservative (true range wider
+				// than computed), or if it would produce a classification
+				// that disagrees with a full per-triangle scan of this
+				// ring, print a diagnostic. Gated on GLFF_SHADOW_DUMP,
+				// revert alongside the rest of the verification instrument.
+				if (getenv("GLFF_SHADOW_DUMP")) {
+					float true_min = 1e30f, true_max = -1e30f;
+					bool any_lit = false, any_dark = false;
+					for (int i = start; i < start + count; i++) {
+						float d = nx[i] * p_light_dir_objspace.x + ny[i] * p_light_dir_objspace.y + nz[i] * p_light_dir_objspace.z;
+						float len = Math::sqrt(nx[i] * nx[i] + ny[i] * ny[i] + nz[i] * nz[i]);
+						if (len > CMP_EPSILON) {
+							float dn = d / len; // normalize so it's comparable to min_dot/max_dot (which are in unit-normal terms)
+							if (dn < true_min) {
+								true_min = dn;
+							}
+							if (dn > true_max) {
+								true_max = dn;
+							}
+						}
+						if (d > 0.0f) {
+							any_lit = true;
+						} else {
+							any_dark = true;
+						}
+					}
+					bool bound_unsound = (true_min < min_dot - 0.001f) || (true_max > max_dot + 0.001f);
+					bool classification_wrong = (min_dot > 0.0f && any_dark) || (max_dot <= 0.0f && any_lit);
+					if (bound_unsound || classification_wrong) {
+						fprintf(stderr, "GLFF_RING_SELFCHECK MISMATCH ring=%d start=%d count=%d min_cy=%.4f max_cy=%.4f beta_lo=%.4f beta_hi=%.4f computed_min_dot=%.4f computed_max_dot=%.4f true_min=%.4f true_max=%.4f any_lit=%d any_dark=%d bound_unsound=%d classification_wrong=%d L=(%.4f,%.4f,%.4f)\n",
+								r, start, count, min_cy, max_cy, beta_lo, beta_hi, min_dot, max_dot, true_min, true_max, any_lit, any_dark, bound_unsound, classification_wrong,
+								p_light_dir_objspace.x, p_light_dir_objspace.y, p_light_dir_objspace.z);
+					}
+				}
+
+				if (min_dot > 0.0f) {
+					for (int i = 0; i < count; i++) {
+						faces_light.write[start + i] = true;
+					}
+				} else if (max_dot <= 0.0f) {
+					for (int i = 0; i < count; i++) {
+						faces_light.write[start + i] = false;
+					}
+				} else {
+					for (int i = start; i < start + count; i++) {
+						faces_light.write[i] = (nx[i] * p_light_dir_objspace.x + ny[i] * p_light_dir_objspace.y + nz[i] * p_light_dir_objspace.z) > 0.0f;
+					}
+				}
+			}
+		}
 	} else {
 		// SHADOW_SILHOUETTE_ALGORITHM_FULL (the default) and any algorithm
-		// not yet implemented/applicable fall back to this exact,
-		// unconditional per-triangle test -- always correct, just O(tri_count).
+		// not yet implemented/applicable (including RING_SEGMENT requested
+		// on content with no declared ring topology) fall back to this
+		// exact, unconditional per-triangle test -- always correct, just
+		// O(tri_count).
 		for (int t = 0; t < tri_count; t++) {
 			faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
 		}
@@ -1022,6 +1298,11 @@ struct ShadowVolumeCacheEntry {
 	// invalidates the cache instead of silently reusing volume geometry
 	// built under the OLD algorithm for one stale frame.
 	VS::ShadowSilhouetteAlgorithm algorithm = VS::SHADOW_SILHOUETTE_ALGORITHM_FULL;
+	// godot-ports#50: also part of the cache key for the same reason --
+	// only meaningful when algorithm == RING_SEGMENT, but cheap to compare
+	// unconditionally.
+	int ring_radial_segments = 0;
+	int ring_count = 0;
 	Vector<Vector3> vol_tris;
 };
 static Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry> shadow_volume_cache;
@@ -1194,21 +1475,23 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		// for how a since-destroyed instance's stale entry gets cleared
 		// out rather than accumulating forever.
 		Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry>::Element *CE = shadow_volume_cache.find(instance);
-		bool cache_hit = CE && CE->value().mesh == mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm;
+		bool cache_hit = CE && CE->value().mesh == mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm && CE->value().ring_radial_segments == instance->shadow_ring_radial_segments && CE->value().ring_count == instance->shadow_ring_count;
 		if (!CE) {
 			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
 		if (!cache_hit) {
 			CE->value().vol_tris.resize(0);
 			for (int s = 0; s < mesh->surfaces.size(); s++) {
-				_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, CE->value().vol_tris);
+				_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, CE->value().vol_tris);
 			}
 			CE->value().mesh = mesh;
 			CE->value().transform = instance->transform;
 			CE->value().light_dir_objspace = light_dir_objspace;
 			CE->value().algorithm = instance->shadow_silhouette_algorithm;
+			CE->value().ring_radial_segments = instance->shadow_ring_radial_segments;
+			CE->value().ring_count = instance->shadow_ring_count;
 
-			// TEMPORARY godot-ports#49 correctness-verification instrumentation
+			// TEMPORARY godot-ports#49/#50 correctness-verification instrumentation
 			// -- dumps the exact emitted shadow-volume triangle list every time
 			// it's rebuilt, gated on an env var so it's zero-cost/inert in any
 			// normal run. Not a permanent feature; revert once #49's

@@ -567,6 +567,7 @@ public:
 	FUNC2(instance_geometry_set_shadow_silhouette_algorithm, RID, ShadowSilhouetteAlgorithm)
 	FUNC2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
 	FUNC2(instance_geometry_set_shadow_lod_proxy, RID, RID)
+	FUNC3(instance_geometry_set_shadow_ring_topology, RID, int, int)
 
 	/* CANVAS (2D) */
 
