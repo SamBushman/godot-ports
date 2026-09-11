@@ -707,6 +707,33 @@ public:
 		// fallback, not removed).
 		Vector<int> shadow_edge_owner0;
 		Vector<int> shadow_edge_owner1;
+
+		// godot-ports#49: flat 6-bucket normal-cone bounding hierarchy, used
+		// only when an instance selects
+		// VS::SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE. Built lazily (only if
+		// actually requested -- most content stays on the default FULL
+		// algorithm and never pays this) alongside the rest of the topology
+		// cache, invalidated the same way (shadow_topology_built = false in
+		// _decode_surface_arrays() also resets shadow_cluster_built).
+		//
+		// Triangles are bucket-sorted by which of 6 cube-face directions
+		// their cached normal (shadow_tri_normal_x/y/z) is closest to, so
+		// all of one cluster's triangle ids sit in one contiguous range of
+		// shadow_cluster_tri_order -- shadow_cluster_tri_start[c]/
+		// shadow_cluster_tri_count[c] index directly into it, no per-cluster
+		// heap allocation. shadow_cluster_dir[c] is that cluster's
+		// representative unit direction; shadow_cluster_sin_alpha[c] is
+		// sin(alpha) where alpha is the widest angle between shadow_cluster_dir[c]
+		// and any triangle normal actually assigned to it -- the margin that
+		// makes a whole-cluster "definitely lit"/"definitely dark" verdict
+		// provably correct (not just a plausible average), see
+		// _build_shadow_volume_triangles()'s use of it for the exact test.
+		bool shadow_cluster_built = false;
+		Vector<int> shadow_cluster_tri_order; // permutation of triangle ids, grouped contiguously by cluster
+		int shadow_cluster_tri_start[6] = { 0, 0, 0, 0, 0, 0 };
+		int shadow_cluster_tri_count[6] = { 0, 0, 0, 0, 0, 0 };
+		Vector3 shadow_cluster_dir[6];
+		float shadow_cluster_sin_alpha[6] = { 0, 0, 0, 0, 0, 0 };
 	};
 
 	struct Mesh : public RID_Data {

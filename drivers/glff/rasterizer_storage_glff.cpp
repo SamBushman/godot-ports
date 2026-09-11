@@ -391,6 +391,11 @@ void RasterizerStorageGLFF::_decode_surface_arrays(Surface *surface) {
 	surface->shadow_tri_indices.clear();
 	surface->shadow_edges.clear();
 	surface->shadow_tri_edges.clear();
+	// godot-ports#49: the normal-cone cluster hierarchy is a function of
+	// the same triangle/normal data, so it goes stale at exactly the same
+	// point -- reset it here too rather than only where it's built.
+	surface->shadow_cluster_built = false;
+	surface->shadow_cluster_tri_order.clear();
 
 	surface->has_normals = (p_format & VS::ARRAY_FORMAT_NORMAL) != 0;
 	surface->has_colors = (p_format & VS::ARRAY_FORMAT_COLOR) != 0;

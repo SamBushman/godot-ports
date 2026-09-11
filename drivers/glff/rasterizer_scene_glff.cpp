@@ -3,6 +3,7 @@
 #include "rasterizer_storage_glff.h"
 #include "core/map.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
@@ -717,7 +718,118 @@ static void _build_shadow_topology_if_needed(RasterizerStorageGLFF::Surface *p_s
 	}
 }
 
-static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, Vector<Vector3> &r_triangles) {
+// godot-ports#49: flat 6-bucket normal-cone bounding hierarchy, built
+// lazily (only the first time a surface is actually asked to use the
+// NORMAL_CONE algorithm -- most content stays on the default FULL
+// algorithm and never allocates this). See the field comments on
+// RasterizerStorageGLFF::Surface::shadow_cluster_* for what each array
+// holds; this function only fills them in, using the SAME cached
+// (unnormalized) per-triangle normals _build_shadow_topology_if_needed()
+// already computed for the plain per-triangle test -- no new geometry
+// reads, no new cross products.
+static void _build_shadow_clusters_if_needed(RasterizerStorageGLFF::Surface *p_surface) {
+	_build_shadow_topology_if_needed(p_surface);
+	if (p_surface->shadow_cluster_built) {
+		return;
+	}
+	p_surface->shadow_cluster_built = true;
+
+	int tri_count = p_surface->shadow_tri_indices.size() / 3;
+	if (tri_count == 0) {
+		return;
+	}
+
+	static const Vector3 CLUSTER_DIRS[6] = {
+		Vector3(1, 0, 0), Vector3(-1, 0, 0),
+		Vector3(0, 1, 0), Vector3(0, -1, 0),
+		Vector3(0, 0, 1), Vector3(0, 0, -1)
+	};
+
+	const float *nx = p_surface->shadow_tri_normal_x.ptr();
+	const float *ny = p_surface->shadow_tri_normal_y.ptr();
+	const float *nz = p_surface->shadow_tri_normal_z.ptr();
+
+	// Pass 1: classify each triangle into whichever of the 6 cluster
+	// directions its (normalized) cached normal is closest to (max dot),
+	// and count cluster sizes for a contiguous counting sort in pass 2.
+	Vector<int> cluster_of_tri;
+	cluster_of_tri.resize(tri_count);
+	int counts[6] = { 0, 0, 0, 0, 0, 0 };
+	for (int t = 0; t < tri_count; t++) {
+		Vector3 n(nx[t], ny[t], nz[t]);
+		real_t len = n.length();
+		int best = 0;
+		if (len > CMP_EPSILON) {
+			n /= len;
+			real_t best_dot = -2.0;
+			for (int c = 0; c < 6; c++) {
+				real_t d = n.dot(CLUSTER_DIRS[c]);
+				if (d > best_dot) {
+					best_dot = d;
+					best = c;
+				}
+			}
+		}
+		// Degenerate (zero-area) triangle: len <= CMP_EPSILON, arbitrarily
+		// assigned to cluster 0. Harmless either way -- a degenerate
+		// triangle contributes nothing to the emitted shadow geometry
+		// regardless of which cluster's verdict it inherits.
+		cluster_of_tri.write[t] = best;
+		counts[best]++;
+	}
+
+	// Pass 2: counting sort into shadow_cluster_tri_order, contiguous per
+	// cluster (shadow_cluster_tri_start[c]..+shadow_cluster_tri_count[c]).
+	int offsets[6];
+	offsets[0] = 0;
+	for (int c = 1; c < 6; c++) {
+		offsets[c] = offsets[c - 1] + counts[c - 1];
+	}
+	for (int c = 0; c < 6; c++) {
+		p_surface->shadow_cluster_tri_start[c] = offsets[c];
+		p_surface->shadow_cluster_tri_count[c] = counts[c];
+		p_surface->shadow_cluster_dir[c] = CLUSTER_DIRS[c];
+	}
+	p_surface->shadow_cluster_tri_order.resize(tri_count);
+	{
+		int cursor[6] = { offsets[0], offsets[1], offsets[2], offsets[3], offsets[4], offsets[5] };
+		for (int t = 0; t < tri_count; t++) {
+			int c = cluster_of_tri[t];
+			p_surface->shadow_cluster_tri_order.write[cursor[c]++] = t;
+		}
+	}
+
+	// Pass 3: per cluster, find the widest angle (smallest dot) between
+	// the cluster's own representative direction and any triangle normal
+	// actually assigned to it -- this is alpha, the half-angle margin.
+	// NOT optional/approximate: a per-frame verdict of "every triangle in
+	// this cluster is definitely lit/dark" is only provably correct if it
+	// accounts for the cluster's full angular spread, not just its
+	// average direction (see _build_shadow_volume_triangles()'s use of
+	// shadow_cluster_sin_alpha for the exact test this guards).
+	const int *order = p_surface->shadow_cluster_tri_order.ptr();
+	for (int c = 0; c < 6; c++) {
+		real_t min_dot = 1.0;
+		int start = p_surface->shadow_cluster_tri_start[c];
+		int count = p_surface->shadow_cluster_tri_count[c];
+		for (int i = 0; i < count; i++) {
+			int t = order[start + i];
+			Vector3 n(nx[t], ny[t], nz[t]);
+			real_t len = n.length();
+			if (len > CMP_EPSILON) {
+				n /= len;
+				real_t d = n.dot(CLUSTER_DIRS[c]);
+				if (d < min_dot) {
+					min_dot = d;
+				}
+			}
+		}
+		real_t alpha = (count > 0) ? Math::acos(CLAMP(min_dot, (real_t)-1.0, (real_t)1.0)) : 0.0;
+		p_surface->shadow_cluster_sin_alpha[c] = (float)Math::sin(alpha);
+	}
+}
+
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, Vector<Vector3> &r_triangles) {
 	_build_shadow_topology_if_needed(p_surface);
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (tri_count == 0) {
@@ -739,8 +851,56 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 	const float *nx = p_surface->shadow_tri_normal_x.ptr();
 	const float *ny = p_surface->shadow_tri_normal_y.ptr();
 	const float *nz = p_surface->shadow_tri_normal_z.ptr();
-	for (int t = 0; t < tri_count; t++) {
-		faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
+
+	// godot-ports#49: cluster-level cull, only when explicitly selected --
+	// see _build_shadow_clusters_if_needed()'s own comment for what each
+	// array holds and why the sin_alpha margin isn't optional. Any
+	// cluster that resolves definitively (light falls outside its ±alpha
+	// gray band around the 90 degree facing line) sets faces_light for
+	// its whole triangle range with zero per-triangle tests; ambiguous
+	// clusters fall back to exactly the same per-triangle dot product the
+	// FULL algorithm always uses.
+	if (p_algorithm == VS::SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE) {
+		_build_shadow_clusters_if_needed(p_surface);
+		const int *order = p_surface->shadow_cluster_tri_order.ptr();
+		for (int c = 0; c < 6; c++) {
+			int start = p_surface->shadow_cluster_tri_start[c];
+			int count = p_surface->shadow_cluster_tri_count[c];
+			if (count == 0) {
+				continue;
+			}
+			const Vector3 &C = p_surface->shadow_cluster_dir[c];
+			float dot_cl = C.x * p_light_dir_objspace.x + C.y * p_light_dir_objspace.y + C.z * p_light_dir_objspace.z;
+			float sin_alpha = p_surface->shadow_cluster_sin_alpha[c];
+			if (dot_cl > sin_alpha) {
+				// angle(C, L) < 90 - alpha: every triangle in the cluster
+				// clears 90 degrees even at its widest deviation -- all lit.
+				for (int i = 0; i < count; i++) {
+					faces_light.write[order[start + i]] = true;
+				}
+			} else if (dot_cl < -sin_alpha) {
+				// angle(C, L) > 90 + alpha: symmetric guarantee -- all dark.
+				for (int i = 0; i < count; i++) {
+					faces_light.write[order[start + i]] = false;
+				}
+			} else {
+				// Gray band: light falls close enough to this cluster's
+				// own 90-degree line that individual members could
+				// disagree with the cluster average -- resolve each one
+				// exactly, same test the FULL algorithm always uses.
+				for (int i = 0; i < count; i++) {
+					int t = order[start + i];
+					faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
+				}
+			}
+		}
+	} else {
+		// SHADOW_SILHOUETTE_ALGORITHM_FULL (the default) and any algorithm
+		// not yet implemented/applicable fall back to this exact,
+		// unconditional per-triangle test -- always correct, just O(tri_count).
+		for (int t = 0; t < tri_count; t++) {
+			faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
+		}
 	}
 
 	Vector3 extrude = -p_light_dir_objspace.normalized() * p_extrude_distance;
@@ -857,6 +1017,11 @@ struct ShadowVolumeCacheEntry {
 	Transform transform;
 	Vector3 light_dir_objspace;
 	RasterizerStorageGLFF::Mesh *mesh = nullptr;
+	// godot-ports#49/#54: included in the cache key so a script changing an
+	// instance's shadow_silhouette_algorithm at runtime (rare, but possible)
+	// invalidates the cache instead of silently reusing volume geometry
+	// built under the OLD algorithm for one stale frame.
+	VS::ShadowSilhouetteAlgorithm algorithm = VS::SHADOW_SILHOUETTE_ALGORITHM_FULL;
 	Vector<Vector3> vol_tris;
 };
 static Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry> shadow_volume_cache;
@@ -1029,18 +1194,51 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		// for how a since-destroyed instance's stale entry gets cleared
 		// out rather than accumulating forever.
 		Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry>::Element *CE = shadow_volume_cache.find(instance);
-		bool cache_hit = CE && CE->value().mesh == mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace;
+		bool cache_hit = CE && CE->value().mesh == mesh && CE->value().transform == instance->transform && CE->value().light_dir_objspace == light_dir_objspace && CE->value().algorithm == instance->shadow_silhouette_algorithm;
 		if (!CE) {
 			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
 		if (!cache_hit) {
 			CE->value().vol_tris.resize(0);
 			for (int s = 0; s < mesh->surfaces.size(); s++) {
-				_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, CE->value().vol_tris);
+				_build_shadow_volume_triangles(mesh->surfaces[s], light_dir_objspace, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, CE->value().vol_tris);
 			}
 			CE->value().mesh = mesh;
 			CE->value().transform = instance->transform;
 			CE->value().light_dir_objspace = light_dir_objspace;
+			CE->value().algorithm = instance->shadow_silhouette_algorithm;
+
+			// TEMPORARY godot-ports#49 correctness-verification instrumentation
+			// -- dumps the exact emitted shadow-volume triangle list every time
+			// it's rebuilt, gated on an env var so it's zero-cost/inert in any
+			// normal run. Not a permanent feature; revert once #49's
+			// FULL-vs-NORMAL_CONE comparison is confirmed. See
+			// _build_shadow_volume_triangles(): both algorithms iterate
+			// t=0..tri_count-1 in the same fixed order and only differ in how
+			// faces_light[t] gets computed, so two runs of the SAME rotation
+			// sequence differing only in shadow_silhouette_algorithm should
+			// produce byte-identical dumps if (and only if) the cluster
+			// algorithm is correct.
+			{
+				static int dump_enabled = -1;
+				if (dump_enabled < 0) {
+					dump_enabled = getenv("GLFF_SHADOW_DUMP") ? 1 : 0;
+				}
+				if (dump_enabled) {
+					static int dump_counter = 0;
+					char path[256];
+					snprintf(path, sizeof(path), "/tmp/glff_shadow_dump/inst_%p_%04d.txt", (void *)instance, dump_counter++);
+					FILE *f = fopen(path, "w");
+					if (f) {
+						const Vector<Vector3> &dv = CE->value().vol_tris;
+						fprintf(f, "%d\n", dv.size());
+						for (int vi = 0; vi < dv.size(); vi++) {
+							fprintf(f, "%.6f %.6f %.6f\n", dv[vi].x, dv[vi].y, dv[vi].z);
+						}
+						fclose(f);
+					}
+				}
+			}
 		}
 		const Vector<Vector3> &vol_tris = CE->value().vol_tris;
 		if (vol_tris.size() == 0) {
