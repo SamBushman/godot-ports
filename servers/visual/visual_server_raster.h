@@ -328,6 +328,7 @@ public:
 	BIND3(light_set_param, RID, LightParam, float)
 	BIND2(light_set_shadow, RID, bool)
 	BIND2(light_set_shadow_color, RID, const Color &)
+	BIND2(light_set_shadow_relight_mode, RID, ShadowRelightMode)
 	BIND2(light_set_projector, RID, RID)
 	BIND2(light_set_negative, RID, bool)
 	BIND2(light_set_cull_mask, RID, uint32_t)
@@ -660,6 +661,9 @@ public:
 	BIND2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
 	BIND2(instance_geometry_set_shadow_lod_proxy, RID, RID)
 	BIND3(instance_geometry_set_shadow_ring_topology, RID, int, int)
+	BIND2(instance_geometry_set_shadow_relight_inclusion, RID, ShadowRelightInclusion)
+	BIND2(instance_geometry_set_shadow_relight_self, RID, bool)
+	BIND3(instance_geometry_set_shadow_relight_aabb, RID, bool, const AABB &)
 
 #undef BINDBASE
 //from now on, calls forwarded to this singleton

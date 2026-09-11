@@ -2000,6 +2000,7 @@ void VisualServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_param", "light", "param", "value"), &VisualServer::light_set_param);
 	ClassDB::bind_method(D_METHOD("light_set_shadow", "light", "enabled"), &VisualServer::light_set_shadow);
 	ClassDB::bind_method(D_METHOD("light_set_shadow_color", "light", "color"), &VisualServer::light_set_shadow_color);
+	ClassDB::bind_method(D_METHOD("light_set_shadow_relight_mode", "light", "mode"), &VisualServer::light_set_shadow_relight_mode);
 	ClassDB::bind_method(D_METHOD("light_set_projector", "light", "texture"), &VisualServer::light_set_projector);
 	ClassDB::bind_method(D_METHOD("light_set_negative", "light", "enable"), &VisualServer::light_set_negative);
 	ClassDB::bind_method(D_METHOD("light_set_cull_mask", "light", "mask"), &VisualServer::light_set_cull_mask);
@@ -2191,6 +2192,9 @@ void VisualServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_temporal_cache", "instance", "cache"), &VisualServer::instance_geometry_set_shadow_temporal_cache);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_lod_proxy", "instance", "proxy_mesh"), &VisualServer::instance_geometry_set_shadow_lod_proxy);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_ring_topology", "instance", "radial_segments", "rings"), &VisualServer::instance_geometry_set_shadow_ring_topology);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_relight_inclusion", "instance", "inclusion"), &VisualServer::instance_geometry_set_shadow_relight_inclusion);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_relight_self", "instance", "enabled"), &VisualServer::instance_geometry_set_shadow_relight_self);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_relight_aabb", "instance", "enabled", "aabb"), &VisualServer::instance_geometry_set_shadow_relight_aabb);
 
 	ClassDB::bind_method(D_METHOD("instances_cull_aabb", "aabb", "scenario"), &VisualServer::_instances_cull_aabb_bind, DEFVAL(RID()));
 	ClassDB::bind_method(D_METHOD("instances_cull_ray", "from", "to", "scenario"), &VisualServer::_instances_cull_ray_bind, DEFVAL(RID()));
@@ -2505,6 +2509,13 @@ void VisualServer::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_NONE);
 	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED);
 	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE);
+
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_INCLUSION_DYNAMIC);
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_INCLUSION_ALWAYS);
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_INCLUSION_NEVER);
+
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_MODE_ADDITIVE);
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_MODE_SUBTRACTIVE);
 
 	BIND_ENUM_CONSTANT(NINE_PATCH_STRETCH);
 	BIND_ENUM_CONSTANT(NINE_PATCH_TILE);

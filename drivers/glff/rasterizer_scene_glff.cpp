@@ -1420,7 +1420,7 @@ static const int SHADOW_VOLUME_CACHE_MAX_ENTRIES = 256;
 // hitting real geometry. p_light_dir_world is GL's own light-position
 // convention already used elsewhere in this file: the direction FROM a
 // surface TOWARD the light, not the direction the light travels.
-static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, const Transform &p_cam_transform, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count) {
+static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, const Transform &p_cam_transform, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count, bool p_subtractive, const Color &p_ambient_color) {
 	if (shadow_volume_cache.size() > SHADOW_VOLUME_CACHE_MAX_ENTRIES) {
 		shadow_volume_cache.clear();
 	}
@@ -1705,6 +1705,45 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 
 	glDisable(GL_POLYGON_OFFSET_FILL);
 
+	// godot-ports#55/#56: relight-culling AABB test. An earlier version
+	// swept each caster's AABB by the full SHADOW_EXTRUDE_DISTANCE
+	// (200 -- the distance the real shadow-volume geometry uses, chosen
+	// there to guarantee correctness against a receiver arbitrarily far
+	// away) and measured ZERO skips: Mob and Player kept "crossing" each
+	// other's shadow reach despite standing only ~3 units apart. That
+	// swept-AABB math was exact, not buggy -- merging a box with itself
+	// translated by a vector IS the true Minkowski sum of the box and that
+	// segment. The real problem was the 200-unit magnitude itself: this
+	// scene's light comes from (3,6,4) looking at the origin, so its
+	// travel direction has real X/Z components, not just straight down --
+	// sweeping 200 units along a diagonal shifts the box tens of units
+	// sideways too, dwarfing the 3-unit gap between the characters and
+	// guaranteeing overlap almost regardless of where they actually stand.
+	// Fix: don't use one global sweep distance at all. For each (caster,
+	// receiver) PAIR, bound the sweep to roughly how far that specific
+	// receiver actually is from that specific caster (plus the receiver's
+	// own size as margin) -- a receiver can't be in a caster's shadow path
+	// if the shadow doesn't need to travel anywhere near that far to reach
+	// it. This is computed fresh per pair below (caster AABBs cached
+	// unswept here; the receiver loop builds each pair's own swept box).
+	bool subtractive = p_subtractive;
+	AABB caster_world_aabb[MAX_PRIORITY_CASTERS + MAX_DISTANCE_CASTERS];
+	Vector3 light_travel_dir; // unit vector, the direction light actually travels (away from the light)
+	if (subtractive && caster_count > 0) {
+		light_travel_dir = -p_light_dir_world.normalized();
+		for (int ci = 0; ci < caster_count; ci++) {
+			RasterizerScene::InstanceBase *cinst = p_cull_result[caster_idx[ci]];
+			// godot-ports#55: shadow_relight_aabb, when enabled on this
+			// instance, replaces the real mesh AABB as the shape this
+			// caster's shadow reach is built from -- an explicit override
+			// for content where the automatic mesh bounds are a poor
+			// stand-in (e.g. deliberately larger/smaller than the render
+			// mesh itself).
+			AABB local_aabb = cinst->shadow_relight_aabb_enabled ? cinst->shadow_relight_aabb : p_storage->mesh_get_aabb(cinst->base, RID());
+			caster_world_aabb[ci] = cinst->transform.xform(local_aabb);
+		}
+	}
+
 	// Additive relight: only this one light, only where the stencil buffer
 	// is still exactly 0 (never net-entered a shadow volume), only onto
 	// fragments that already exist at this exact depth (the opaque pass's
@@ -1730,20 +1769,47 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	// redraw's depth is reliably <= the stored depth regardless of FP
 	// noise -- deterministic instead of a per-pixel coin flip.
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-	glStencilFunc(GL_EQUAL, 0, 0xFF);
+	if (subtractive) {
+		glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+	} else {
+		glStencilFunc(GL_EQUAL, 0, 0xFF);
+	}
 	glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_FALSE);
 	glEnable(GL_POLYGON_OFFSET_FILL);
 	glPolygonOffset(-1.0f, -4.0f);
 	glEnable(GL_LIGHTING);
-	glEnable(p_gl_light);
-	glEnable(GL_BLEND);
-	glBlendEquation(GL_FUNC_ADD);
-	glBlendFunc(GL_ONE, GL_ONE);
 
-	GLfloat zero_amb[4] = { 0, 0, 0, 1 };
-	glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero_amb); // ambient already accounted for in the base pass
+	// godot-ports#58: SUBTRACTIVE mode's shadowed-side draw does NOT try to
+	// compute this light's contribution and subtract it back out (that's
+	// what #57 attempted, and it's provably unsafe: specular is a sharp,
+	// non-linear term, and two SEPARATE draw calls computing it can't be
+	// relied on to match closely enough for a subtraction to land on
+	// exactly zero -- confirmed live, a highlight that didn't cancel
+	// cleanly clamped to solid black on a shadowed region). Instead,
+	// shadowed fragments are OVERWRITTEN with the exact correct value
+	// directly: this light disabled, real scene ambient restored (it's
+	// no longer "already accounted for" here -- this draw isn't adding on
+	// top of the base pass's own contribution, it's replacing it
+	// outright) -- precisely the same computation ADDITIVE mode's base
+	// pass already does for every fragment, just gated to the shadowed
+	// side instead of drawn everywhere. No subtraction anywhere, so no
+	// cancellation risk, and still exactly one extra draw -- the existing
+	// correction pass just does a different thing now, not a new one.
+	if (subtractive) {
+		glDisable(p_gl_light);
+		glDisable(GL_BLEND);
+		GLfloat real_amb[4] = { p_ambient_color.r, p_ambient_color.g, p_ambient_color.b, 1.0f };
+		glLightModelfv(GL_LIGHT_MODEL_AMBIENT, real_amb);
+	} else {
+		glEnable(p_gl_light);
+		glEnable(GL_BLEND);
+		glBlendEquation(GL_FUNC_ADD);
+		glBlendFunc(GL_ONE, GL_ONE);
+		GLfloat zero_amb[4] = { 0, 0, 0, 1 };
+		glLightModelfv(GL_LIGHT_MODEL_AMBIENT, zero_amb); // ambient already accounted for in the base pass
+	}
 
 	for (int i = 0; i < p_cull_count; i++) {
 		RasterizerScene::InstanceBase *instance = p_cull_result[i];
@@ -1753,6 +1819,72 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 		RasterizerStorageGLFF::Mesh *mesh = p_storage->mesh_owner.getornull(instance->base);
 		if (!mesh) {
 			continue;
+		}
+		if (subtractive) {
+			// godot-ports#55: per-instance override, checked before the
+			// automatic test even runs -- ALWAYS/NEVER are a hard escape
+			// hatch for content where the bounding-volume heuristic below
+			// gets the wrong answer for this specific mesh.
+			if (instance->shadow_relight_inclusion == VS::SHADOW_RELIGHT_INCLUSION_ALWAYS) {
+				// falls through to the draw below
+			} else if (instance->shadow_relight_inclusion == VS::SHADOW_RELIGHT_INCLUSION_NEVER) {
+				continue;
+			} else if (caster_count == 0) {
+				continue; // no real casters this frame -- nothing anywhere needs correcting
+			} else {
+				// godot-ports#55: shadow_relight_aabb, when enabled, replaces
+				// the real mesh AABB as the shape this instance presents in
+				// its RECEIVER role too -- see the caster-side use above for
+				// the same override on the other side of the pair test.
+				AABB local_aabb = instance->shadow_relight_aabb_enabled ? instance->shadow_relight_aabb : p_storage->mesh_get_aabb(instance->base, RID());
+				AABB world_aabb = instance->transform.xform(local_aabb);
+				// Receiver's own size, used as margin below -- a receiver isn't
+				// a point, its own extent counts toward "close enough".
+				real_t receiver_radius = world_aabb.get_longest_axis_size() * 0.5f;
+				bool touched = false;
+				for (int ci = 0; ci < caster_count; ci++) {
+					// godot-ports#55: an instance's own AABB is checked
+					// against OTHER casters only by default -- comparing it
+					// against ITSELF is a tautology (a box always contains
+					// itself, and the swept version only ever grows the
+					// box, so self-vs-self would intersect unconditionally
+					// regardless of geometry, light direction, or sweep
+					// length). Counting that as "touched" meant every
+					// caster always qualified for correction no matter
+					// what, defeating the entire point of this filter.
+					// shadow_relight_self opts a specific instance back
+					// into being checked against its own shadow reach too
+					// (still just this same coarse AABB test, so it can't
+					// truly detect self-shadowing -- it's a blunt "always
+					// include" for this instance when enabled, not a real
+					// self-shadow test).
+					bool is_self = p_cull_result[caster_idx[ci]] == instance;
+					if (is_self && !instance->shadow_relight_self) {
+						continue;
+					}
+					// Bound this PAIR's sweep to how far the shadow actually
+					// needs to travel to plausibly reach this receiver, not the
+					// full (and here, wildly oversized) real extrude distance --
+					// see this function's own leading comment on why a fixed
+					// global sweep length defeated lateral separation for a
+					// diagonal light in a small scene.
+					Vector3 caster_center = caster_world_aabb[ci].position + caster_world_aabb[ci].size * 0.5f;
+					Vector3 receiver_center = world_aabb.position + world_aabb.size * 0.5f;
+					real_t pair_sweep_len = MIN((real_t)SHADOW_EXTRUDE_DISTANCE, caster_center.distance_to(receiver_center) + receiver_radius);
+					Vector3 extrude_vec = light_travel_dir * pair_sweep_len;
+					AABB swept = caster_world_aabb[ci];
+					AABB translated = swept;
+					translated.position += extrude_vec;
+					swept.merge_with(translated);
+					if (world_aabb.intersects(swept)) {
+						touched = true;
+						break;
+					}
+				}
+				if (!touched) {
+					continue;
+				}
+			}
 		}
 
 		bool matrix_pushed = false;
@@ -1813,39 +1945,63 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			GLfloat mat_diffuse[4] = { albedo.r, albedo.g, albedo.b, 1.0f };
 			glMaterialfv(GL_FRONT_AND_BACK, GL_DIFFUSE, mat_diffuse);
 			glMaterialfv(GL_FRONT_AND_BACK, GL_AMBIENT, mat_diffuse);
-			// godot-ports#26 bugfix: GL_SPECULAR/GL_SHININESS were never
-			// reset per-surface here (only DIFFUSE/AMBIENT were), so this
-			// pass silently inherited whatever the BASE pass's own
-			// specular approximation (godot-ports#24) last left active --
-			// typically a real, non-zero material specular color paired
-			// with GL_SHININESS 0, which fixed-function lighting renders
-			// as a huge, angle-independent specular term. WHICH instance's
-			// specular state survived depended entirely on which instance
-			// the base pass happened to draw LAST, which in turn depends
-			// on p_cull_result's order -- confirmed via instrumentation
-			// that Godot's own culling/octree genuinely reorders that
-			// array whenever any instance's transform changes (not just
-			// the specific instance that moved). So the leaked value
-			// could flip between frames purely from something in the
-			// scene moving, uniformly over-brightening every surface this
-			// pass relights at once -- exactly the reported whole-scene
-			// brightness flicker, and why it tracked animation/movement
-			// rather than any single object's own state. This pass has
-			// never attempted to replicate the base pass's specular
-			// approximation for the relit light (out of scope, not a
-			// deliberate omission being restored) -- zero it explicitly,
-			// the same way DIFFUSE/AMBIENT already are, so every draw
-			// here is fully self-contained regardless of draw order.
-			GLfloat zero_specular[4] = { 0, 0, 0, 1 };
-			glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero_specular);
-			glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
-			// Same leak, same fix, for GL_EMISSION -- the base pass's own
-			// godot-ports#24 comment on this exact call already flags it
-			// as "sticky material state that would otherwise leak into a
-			// following surface," but that discipline was only applied
-			// there, never mirrored here.
-			GLfloat zero_emission[4] = { 0, 0, 0, 1 };
-			glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero_emission);
+			// godot-ports#26 bugfix (original): GL_SPECULAR/GL_SHININESS
+			// were never reset per-surface here, so this pass silently
+			// inherited whatever the BASE pass's own specular
+			// approximation (godot-ports#24) last left active -- a real,
+			// order-dependent state leak, fixed at the time by zeroing
+			// both explicitly.
+			//
+			// godot-ports#58: the zero VALUE from that fix is no longer
+			// needed at all, in EITHER mode. Real GL_SPECULAR/GL_SHININESS
+			// (mirroring godot-ports#24's own SPECULAR_PHONG
+			// approximation exactly) is always safe to set here now,
+			// because the LIGHT's own enabled/disabled state (toggled
+			// above, per mode) is what actually gates whether it
+			// contributes: ADDITIVE enables it (this draw only ever adds,
+			// on the unshadowed side, so real specular is pure upside);
+			// SUBTRACTIVE disables it (this draw overwrites the shadowed
+			// side with "everything except this light," so a disabled
+			// light naturally contributes zero specular from it, no
+			// subtraction or cancellation involved). See godot-ports#57
+			// for why actually SUBTRACTING a computed specular value
+			// (the first attempt) was unsafe -- confirmed live to clamp
+			// to solid black under real content.
+			bool effective_specular_disabled = (mat && mat->ff_active) ? true : (shader && shader->specular_disabled);
+			if (!effective_specular_disabled && mat) {
+				GLfloat spec = mat->specular;
+				GLfloat mat_specular[4] = { spec, spec, spec, 1.0f };
+				glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, mat_specular);
+				GLfloat shininess = CLAMP((1.0f - mat->roughness) * 128.0f, 0.0f, 128.0f);
+				glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, shininess);
+			} else {
+				GLfloat zero_specular[4] = { 0, 0, 0, 1 };
+				glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, zero_specular);
+				glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, 0.0f);
+			}
+			// godot-ports#26 (original): zeroed unconditionally here to
+			// avoid double-counting against the base pass's own emission
+			// -- correct for ADDITIVE (this draw adds on top of a base
+			// pass that already drew the surface's real emission once).
+			// godot-ports#58: SUBTRACTIVE's draw OVERWRITES the shadowed
+			// fragment rather than adding to it, so zeroing emission there
+			// would erase it from shadowed regions instead of leaving it
+			// -- emission isn't light-dependent at all, so it must
+			// survive being in shadow. Real value for SUBTRACTIVE, zero
+			// (unchanged) for ADDITIVE.
+			if (subtractive) {
+				bool effective_emission_enabled = (mat && mat->ff_active) ? false : (shader && shader->emission_enabled);
+				if (effective_emission_enabled && mat) {
+					GLfloat mat_emission[4] = { mat->emission.r * mat->emission_energy, mat->emission.g * mat->emission_energy, mat->emission.b * mat->emission_energy, 1.0f };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, mat_emission);
+				} else {
+					GLfloat zero_emission[4] = { 0, 0, 0, 1 };
+					glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero_emission);
+				}
+			} else {
+				GLfloat zero_emission[4] = { 0, 0, 0, 1 };
+				glMaterialfv(GL_FRONT_AND_BACK, GL_EMISSION, zero_emission);
+			}
 			// Same leak, same fix, for GL_COLOR_MATERIAL: any surface
 			// using FLAG_ALBEDO_FROM_VERTEX_COLOR (common on imported
 			// glTF meshes like this project's own mob.glb/player.glb)
@@ -1888,6 +2044,14 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	glDepthFunc(GL_LEQUAL);
 	glDepthMask(GL_TRUE);
 	glDisable(GL_BLEND);
+	// godot-ports#58: SUBTRACTIVE's shadowed-side draw temporarily set
+	// GL_LIGHT_MODEL_AMBIENT to the real scene ambient (see above) --
+	// explicit reset here rather than relying on next frame's base pass
+	// to overwrite it, matching this function's own established
+	// no-assumed-state discipline (the same class of bug godot-ports#26
+	// fixed for specular/emission leaking to whatever runs next).
+	GLfloat cleanup_zero_amb[4] = { 0, 0, 0, 1 };
+	glLightModelfv(GL_LIGHT_MODEL_AMBIENT, cleanup_zero_amb);
 	glDisableClientState(GL_NORMAL_ARRAY);
 }
 
@@ -2222,6 +2386,9 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// this frame" -- the common case renders exactly as before.
 	GLenum primary_shadow_gl_light = 0;
 	bool primary_light_casts_shadow = false;
+	// godot-ports#56: additive (default) vs subtractive relight, read off
+	// the same primary directional light shadow_enabled comes from.
+	bool primary_light_relight_subtractive = false;
 
 	int max_lights = MIN(p_light_cull_count, 8);
 	if (max_lights > 0) {
@@ -2264,6 +2431,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					primary_directional_light_dir_world = dir;
 					primary_shadow_gl_light = gl_light;
 					primary_light_casts_shadow = light->shadow_enabled;
+					primary_light_relight_subtractive = light->shadow_relight_mode == VS::SHADOW_RELIGHT_MODE_SUBTRACTIVE;
 				}
 			} else {
 				Vector3 origin = li->transform.origin;
@@ -2300,7 +2468,10 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// the unshadowed fragments. Its GL_POSITION/GL_DIFFUSE/etc are already
 	// set above; disabling it here only turns off its CONTRIBUTION for
 	// this base pass, it stays fully configured for later re-enabling.
-	if (primary_light_casts_shadow) {
+	// godot-ports#56: in SUBTRACTIVE mode the base pass keeps it enabled --
+	// everything is drawn fully lit here, and the second pass subtracts
+	// this light's contribution back out only where shadowed instead.
+	if (primary_light_casts_shadow && !primary_light_relight_subtractive) {
 		glDisable(primary_shadow_gl_light);
 	}
 
@@ -2847,7 +3018,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// scene, matching how it already sees the lightmap pass's own
 	// contribution from inside the loop above).
 	if (primary_light_casts_shadow) {
-		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cam_transform, p_cull_result, p_cull_count);
+		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cam_transform, p_cull_result, p_cull_count, primary_light_relight_subtractive, ambient_color);
 	}
 
 	// godot-ports#31: capture+blur+blend the fully-composited opaque/

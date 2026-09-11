@@ -991,6 +991,8 @@ public:
 	virtual void light_set_param(RID p_light, VS::LightParam p_param, float p_value);
 	virtual void light_set_shadow(RID p_light, bool p_enabled);
 	virtual void light_set_shadow_color(RID p_light, const Color &p_color);
+	// godot-ports#56: GLFF-only additive/subtractive relight concept, no-op here.
+	virtual void light_set_shadow_relight_mode(RID p_light, VS::ShadowRelightMode p_mode) {}
 	virtual void light_set_projector(RID p_light, RID p_texture);
 	virtual void light_set_negative(RID p_light, bool p_enable);
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask);

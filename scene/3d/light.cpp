@@ -70,6 +70,14 @@ bool Light::has_shadow() const {
 	return shadow;
 }
 
+void Light::set_shadow_relight_mode(ShadowRelightMode p_mode) {
+	shadow_relight_mode = p_mode;
+	VS::get_singleton()->light_set_shadow_relight_mode(light, (VS::ShadowRelightMode)p_mode);
+}
+Light::ShadowRelightMode Light::get_shadow_relight_mode() const {
+	return shadow_relight_mode;
+}
+
 void Light::set_negative(bool p_enable) {
 	negative = p_enable;
 	VS::get_singleton()->light_set_negative(light, p_enable);
@@ -214,6 +222,9 @@ void Light::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shadow", "enabled"), &Light::set_shadow);
 	ClassDB::bind_method(D_METHOD("has_shadow"), &Light::has_shadow);
 
+	ClassDB::bind_method(D_METHOD("set_shadow_relight_mode", "mode"), &Light::set_shadow_relight_mode);
+	ClassDB::bind_method(D_METHOD("get_shadow_relight_mode"), &Light::get_shadow_relight_mode);
+
 	ClassDB::bind_method(D_METHOD("set_negative", "enabled"), &Light::set_negative);
 	ClassDB::bind_method(D_METHOD("is_negative"), &Light::is_negative);
 
@@ -247,6 +258,21 @@ void Light::_bind_methods() {
 	ADD_PROPERTYI(PropertyInfo(Variant::REAL, "shadow_bias", PROPERTY_HINT_RANGE, "-10,10,0.001"), "set_param", "get_param", PARAM_SHADOW_BIAS);
 	ADD_PROPERTYI(PropertyInfo(Variant::REAL, "shadow_contact", PROPERTY_HINT_RANGE, "0,10,0.001"), "set_param", "get_param", PARAM_CONTACT_SHADOW_SIZE);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shadow_reverse_cull_face"), "set_shadow_reverse_cull_face", "get_shadow_reverse_cull_face");
+	// godot-ports#56: GLFF-only, no-op on every other backend (GLES2/
+	// GLES3 use real shadow maps, not stencil shadow volumes, so this
+	// choice doesn't apply to them at all). Additive (default) is today's
+	// exact existing behavior. See godot-ports#55's GeometryInstance
+	// relight-culling properties (shadow_relight_inclusion/_self/_aabb)
+	// -- those only take effect once this light is in Subtractive mode.
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_relight_mode", PROPERTY_HINT_ENUM,
+						 "Additive (default -- this light's own contribution is added back only "
+						 "where NOT shadowed; safe, but a caster/receiver can only ever be SKIPPED "
+						 "from the relight pass if it's fully shadowed, which is rare),"
+						 "Subtractive (godot-ports#56 -- every instance is drawn fully lit up "
+						 "front, this light's contribution is subtracted back out only where "
+						 "shadowed; unlocks GeometryInstance's relight-culling properties, since "
+						 "an instance nothing shadows now needs no correction at all)"),
+			"set_shadow_relight_mode", "get_shadow_relight_mode");
 	ADD_GROUP("Editor", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "editor_only"), "set_editor_only", "is_editor_only");
 	ADD_GROUP("", "");
@@ -273,6 +299,9 @@ void Light::_bind_methods() {
 	BIND_ENUM_CONSTANT(BAKE_DISABLED);
 	BIND_ENUM_CONSTANT(BAKE_INDIRECT);
 	BIND_ENUM_CONSTANT(BAKE_ALL);
+
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_MODE_ADDITIVE);
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_MODE_SUBTRACTIVE);
 }
 
 Light::Light(VisualServer::LightType p_type) {
@@ -299,6 +328,7 @@ Light::Light(VisualServer::LightType p_type) {
 	editor_only = false;
 	set_color(Color(1, 1, 1, 1));
 	set_shadow(false);
+	set_shadow_relight_mode(SHADOW_RELIGHT_MODE_ADDITIVE);
 	set_negative(false);
 	set_cull_mask(0xFFFFFFFF);
 

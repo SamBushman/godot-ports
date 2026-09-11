@@ -138,6 +138,17 @@ public:
 		SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE = VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE,
 	};
 
+	// godot-ports#55: relight-pass culling controls -- only meaningful
+	// under a light using SUBTRACTIVE relight (godot-ports#56; the
+	// default, ADDITIVE, never reads these). GLFF-only, same as the #54
+	// family above. Default (0) on every axis is today's exact existing
+	// behavior.
+	enum ShadowRelightInclusion {
+		SHADOW_RELIGHT_INCLUSION_DYNAMIC = VS::SHADOW_RELIGHT_INCLUSION_DYNAMIC,
+		SHADOW_RELIGHT_INCLUSION_ALWAYS = VS::SHADOW_RELIGHT_INCLUSION_ALWAYS,
+		SHADOW_RELIGHT_INCLUSION_NEVER = VS::SHADOW_RELIGHT_INCLUSION_NEVER,
+	};
+
 private:
 	bool flags[FLAG_MAX];
 	bool generate_lightmap;
@@ -147,6 +158,10 @@ private:
 	ShadowSilhouetteAlgorithm shadow_silhouette_algorithm;
 	ShadowTemporalCache shadow_temporal_cache;
 	Ref<Mesh> shadow_lod_proxy_mesh;
+	ShadowRelightInclusion shadow_relight_inclusion;
+	bool shadow_relight_self;
+	bool shadow_relight_aabb_enabled;
+	AABB shadow_relight_aabb;
 	Ref<Material> material_override;
 	Ref<Material> material_overlay;
 
@@ -175,6 +190,18 @@ public:
 	void set_shadow_lod_proxy_mesh(const Ref<Mesh> &p_mesh);
 	Ref<Mesh> get_shadow_lod_proxy_mesh() const;
 
+	void set_shadow_relight_inclusion(ShadowRelightInclusion p_inclusion);
+	ShadowRelightInclusion get_shadow_relight_inclusion() const;
+
+	void set_shadow_relight_self(bool p_enabled);
+	bool get_shadow_relight_self() const;
+
+	void set_shadow_relight_aabb_enabled(bool p_enabled);
+	bool get_shadow_relight_aabb_enabled() const;
+
+	void set_shadow_relight_aabb(const AABB &p_aabb);
+	AABB get_shadow_relight_aabb() const;
+
 	void set_generate_lightmap(bool p_enabled);
 	bool get_generate_lightmap() const;
 
@@ -201,5 +228,6 @@ VARIANT_ENUM_CAST(GeometryInstance::ShadowCastingSetting);
 VARIANT_ENUM_CAST(GeometryInstance::ShadowGeometrySource);
 VARIANT_ENUM_CAST(GeometryInstance::ShadowSilhouetteAlgorithm);
 VARIANT_ENUM_CAST(GeometryInstance::ShadowTemporalCache);
+VARIANT_ENUM_CAST(GeometryInstance::ShadowRelightInclusion);
 
 #endif // VISUAL_INSTANCE_H

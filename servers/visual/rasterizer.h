@@ -137,6 +137,33 @@ public:
 		int shadow_ring_radial_segments;
 		int shadow_ring_count;
 
+		// godot-ports#55: relight-pass culling controls -- only meaningful
+		// under a light using SUBTRACTIVE relight (godot-ports#56; ADDITIVE,
+		// today's default, never reads these). In subtractive mode the base
+		// pass already draws every instance fully lit, so the second pass
+		// is purely corrective and safe to skip for an instance nothing
+		// actually shadows -- these three axes control that decision.
+		// Zero value on every axis is today's exact existing behavior.
+		VS::ShadowRelightInclusion shadow_relight_inclusion;
+		// godot-ports#55: whether this instance's OWN cast shadow should be
+		// considered when deciding if it needs relight-correcting (a caster
+		// can only meaningfully self-shadow if non-convex -- comparing an
+		// instance's bounds against its own is otherwise a tautology, see
+		// #55's own investigation). Default off (matches the fixed
+		// behavior #55 shipped with) -- turn on per-instance for content
+		// where self-shadowing is visually significant enough to be worth
+		// the redraw.
+		bool shadow_relight_self;
+		// godot-ports#55: optional explicit override for the AABB this
+		// instance presents to the relight-culling test, in BOTH roles --
+		// as a caster, it replaces the box the shadow-reach sweep is built
+		// from; as a receiver, it replaces the box tested for overlap.
+		// Disabled (the default) uses the real mesh AABB, exactly what the
+		// automatic heuristic already does. Local space, transformed by
+		// the instance's own transform same as the real mesh AABB would be.
+		bool shadow_relight_aabb_enabled;
+		AABB shadow_relight_aabb;
+
 		//fit in 32 bits
 		bool mirror : 1;
 		bool receive_shadows : 1;
@@ -175,6 +202,9 @@ public:
 			shadow_temporal_cache = VS::SHADOW_TEMPORAL_CACHE_NONE;
 			shadow_ring_radial_segments = 0;
 			shadow_ring_count = 0;
+			shadow_relight_inclusion = VS::SHADOW_RELIGHT_INCLUSION_DYNAMIC;
+			shadow_relight_self = false;
+			shadow_relight_aabb_enabled = false;
 			receive_shadows = true;
 			visible = true;
 			depth_layer = 0;
@@ -491,6 +521,10 @@ public:
 	virtual void light_set_param(RID p_light, VS::LightParam p_param, float p_value) = 0;
 	virtual void light_set_shadow(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_shadow_color(RID p_light, const Color &p_color) = 0;
+	// godot-ports#56: GLFF-only additive/subtractive relight technique
+	// choice -- see VisualServer's own enum comment for the full
+	// rationale. Every other backend's implementation is a no-op.
+	virtual void light_set_shadow_relight_mode(RID p_light, VS::ShadowRelightMode p_mode) = 0;
 	virtual void light_set_projector(RID p_light, RID p_texture) = 0;
 	virtual void light_set_negative(RID p_light, bool p_enable) = 0;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) = 0;

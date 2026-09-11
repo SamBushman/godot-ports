@@ -1903,6 +1903,30 @@ void VisualServerScene::instance_geometry_set_shadow_ring_topology(RID p_instanc
 	instance->shadow_ring_radial_segments = p_radial_segments;
 	instance->shadow_ring_count = p_rings;
 }
+
+// godot-ports#55: relight-pass culling controls, consumed only by the GLFF
+// backend under SUBTRACTIVE relight (godot-ports#56) -- see rasterizer.h's
+// InstanceBase field comments for what each one means.
+void VisualServerScene::instance_geometry_set_shadow_relight_inclusion(RID p_instance, VS::ShadowRelightInclusion p_inclusion) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_relight_inclusion = p_inclusion;
+}
+void VisualServerScene::instance_geometry_set_shadow_relight_self(RID p_instance, bool p_enabled) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_relight_self = p_enabled;
+}
+void VisualServerScene::instance_geometry_set_shadow_relight_aabb(RID p_instance, bool p_enabled, const AABB &p_aabb) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_relight_aabb_enabled = p_enabled;
+	instance->shadow_relight_aabb = p_aabb;
+}
+
 void VisualServerScene::instance_geometry_set_material_override(RID p_instance, RID p_material) {
 	Instance *instance = instance_owner.get(p_instance);
 	ERR_FAIL_COND(!instance);

@@ -67,11 +67,20 @@ public:
 		BAKE_ALL
 	};
 
+	// godot-ports#56: GLFF-only additive/subtractive stencil relight
+	// choice -- see VisualServer::ShadowRelightMode's own comment for the
+	// full rationale. Meaningless to (and ignored by) any other backend.
+	enum ShadowRelightMode {
+		SHADOW_RELIGHT_MODE_ADDITIVE = VS::SHADOW_RELIGHT_MODE_ADDITIVE,
+		SHADOW_RELIGHT_MODE_SUBTRACTIVE = VS::SHADOW_RELIGHT_MODE_SUBTRACTIVE,
+	};
+
 private:
 	Color color;
 	float param[PARAM_MAX];
 	Color shadow_color;
 	bool shadow;
+	ShadowRelightMode shadow_relight_mode;
 	bool negative;
 	bool reverse_cull;
 	uint32_t cull_mask;
@@ -105,6 +114,9 @@ public:
 	void set_shadow(bool p_enable);
 	bool has_shadow() const;
 
+	void set_shadow_relight_mode(ShadowRelightMode p_mode);
+	ShadowRelightMode get_shadow_relight_mode() const;
+
 	void set_negative(bool p_enable);
 	bool is_negative() const;
 
@@ -132,6 +144,7 @@ public:
 
 VARIANT_ENUM_CAST(Light::Param);
 VARIANT_ENUM_CAST(Light::BakeMode);
+VARIANT_ENUM_CAST(Light::ShadowRelightMode);
 
 class DirectionalLight : public Light {
 	GDCLASS(DirectionalLight, Light);

@@ -499,6 +499,7 @@ public:
 	void light_set_param(RID p_light, VS::LightParam p_param, float p_value) {}
 	void light_set_shadow(RID p_light, bool p_enabled) {}
 	void light_set_shadow_color(RID p_light, const Color &p_color) {}
+	void light_set_shadow_relight_mode(RID p_light, VS::ShadowRelightMode p_mode) {}
 	void light_set_projector(RID p_light, RID p_texture) {}
 	void light_set_negative(RID p_light, bool p_enable) {}
 	void light_set_cull_mask(RID p_light, uint32_t p_mask) {}

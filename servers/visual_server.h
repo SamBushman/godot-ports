@@ -464,6 +464,28 @@ public:
 	virtual void light_set_param(RID p_light, LightParam p_param, float p_value) = 0;
 	virtual void light_set_shadow(RID p_light, bool p_enabled) = 0;
 	virtual void light_set_shadow_color(RID p_light, const Color &p_color) = 0;
+
+	// godot-ports#56: additive vs subtractive stencil-shadow relight
+	// technique (GLFF only -- meaningless to any GLES2/GLES3-style shadow
+	// mapper, which none of this applies to; every other backend takes a
+	// no-op override). ADDITIVE (default) is today's exact existing
+	// behavior: the base pass omits this light's own contribution
+	// entirely, a second pass adds it back only where NOT in shadow.
+	// SUBTRACTIVE (godot-ports#55): the base pass draws every instance
+	// already fully lit including this light, and the second pass
+	// subtracts the contribution back out only where shadowed -- this is
+	// what unlocks the relight-culling properties on GeometryInstance
+	// (shadow_relight_inclusion/_self/_aabb, godot-ports#55): an instance
+	// with nothing shadowing it needs no correction at all under
+	// SUBTRACTIVE, since the base pass already drew it correctly, but
+	// under ADDITIVE skipping it would leave it completely unlit by this
+	// light -- so those GeometryInstance properties only take effect when
+	// the primary shadow-casting light is in SUBTRACTIVE mode.
+	enum ShadowRelightMode {
+		SHADOW_RELIGHT_MODE_ADDITIVE,
+		SHADOW_RELIGHT_MODE_SUBTRACTIVE,
+	};
+	virtual void light_set_shadow_relight_mode(RID p_light, ShadowRelightMode p_mode) = 0;
 	virtual void light_set_projector(RID p_light, RID p_texture) = 0;
 	virtual void light_set_negative(RID p_light, bool p_enable) = 0;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) = 0;
@@ -1028,6 +1050,21 @@ public:
 	// godot-ports#50: (0, 0) means "not a recognized ring-topology primitive" -- see rasterizer.h's InstanceBase field comment.
 	virtual void instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings) = 0;
 
+	// godot-ports#55: relight-pass culling controls. Only meaningful under
+	// a light using SUBTRACTIVE relight (godot-ports#56 -- the default,
+	// ADDITIVE, never reads these; GLFF-only, same as the #54 family
+	// above). Zero value on each axis is today's exact existing behavior.
+	enum ShadowRelightInclusion {
+		SHADOW_RELIGHT_INCLUSION_DYNAMIC, // default: decide per-frame via the automatic bounding-volume overlap test
+		SHADOW_RELIGHT_INCLUSION_ALWAYS, // force this instance into the corrective pass every frame regardless of the test
+		SHADOW_RELIGHT_INCLUSION_NEVER, // force this instance OUT of the corrective pass every frame regardless of the test
+	};
+	virtual void instance_geometry_set_shadow_relight_inclusion(RID p_instance, ShadowRelightInclusion p_inclusion) = 0;
+	virtual void instance_geometry_set_shadow_relight_self(RID p_instance, bool p_enabled) = 0;
+	// p_enabled == false leaves p_aabb unused and falls back to the real
+	// mesh AABB (today's automatic behavior) for this instance.
+	virtual void instance_geometry_set_shadow_relight_aabb(RID p_instance, bool p_enabled, const AABB &p_aabb) = 0;
+
 	/* CANVAS (2D) */
 
 	virtual RID canvas_create() = 0;
@@ -1313,6 +1350,8 @@ VARIANT_ENUM_CAST(VisualServer::ShadowCastingSetting);
 VARIANT_ENUM_CAST(VisualServer::ShadowGeometrySource);
 VARIANT_ENUM_CAST(VisualServer::ShadowSilhouetteAlgorithm);
 VARIANT_ENUM_CAST(VisualServer::ShadowTemporalCache);
+VARIANT_ENUM_CAST(VisualServer::ShadowRelightInclusion);
+VARIANT_ENUM_CAST(VisualServer::ShadowRelightMode);
 VARIANT_ENUM_CAST(VisualServer::TextureType);
 VARIANT_ENUM_CAST(VisualServer::ChangedPriority);
 

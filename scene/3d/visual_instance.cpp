@@ -353,6 +353,52 @@ Ref<Mesh> GeometryInstance::get_shadow_lod_proxy_mesh() const {
 	return shadow_lod_proxy_mesh;
 }
 
+// godot-ports#55: relight-pass culling controls -- same shape as the #54
+// setters above, only meaningful under SUBTRACTIVE relight (godot-ports#56).
+void GeometryInstance::set_shadow_relight_inclusion(ShadowRelightInclusion p_inclusion) {
+	if (p_inclusion != shadow_relight_inclusion) {
+		shadow_relight_inclusion = p_inclusion;
+		VS::get_singleton()->instance_geometry_set_shadow_relight_inclusion(get_instance(), (VS::ShadowRelightInclusion)p_inclusion);
+	}
+}
+
+GeometryInstance::ShadowRelightInclusion GeometryInstance::get_shadow_relight_inclusion() const {
+	return shadow_relight_inclusion;
+}
+
+void GeometryInstance::set_shadow_relight_self(bool p_enabled) {
+	if (p_enabled != shadow_relight_self) {
+		shadow_relight_self = p_enabled;
+		VS::get_singleton()->instance_geometry_set_shadow_relight_self(get_instance(), p_enabled);
+	}
+}
+
+bool GeometryInstance::get_shadow_relight_self() const {
+	return shadow_relight_self;
+}
+
+void GeometryInstance::set_shadow_relight_aabb_enabled(bool p_enabled) {
+	if (p_enabled != shadow_relight_aabb_enabled) {
+		shadow_relight_aabb_enabled = p_enabled;
+		VS::get_singleton()->instance_geometry_set_shadow_relight_aabb(get_instance(), shadow_relight_aabb_enabled, shadow_relight_aabb);
+	}
+}
+
+bool GeometryInstance::get_shadow_relight_aabb_enabled() const {
+	return shadow_relight_aabb_enabled;
+}
+
+void GeometryInstance::set_shadow_relight_aabb(const AABB &p_aabb) {
+	if (p_aabb != shadow_relight_aabb) {
+		shadow_relight_aabb = p_aabb;
+		VS::get_singleton()->instance_geometry_set_shadow_relight_aabb(get_instance(), shadow_relight_aabb_enabled, shadow_relight_aabb);
+	}
+}
+
+AABB GeometryInstance::get_shadow_relight_aabb() const {
+	return shadow_relight_aabb;
+}
+
 void GeometryInstance::set_extra_cull_margin(float p_margin) {
 	ERR_FAIL_COND(p_margin < 0);
 	if (p_margin != extra_cull_margin) {
@@ -393,6 +439,18 @@ void GeometryInstance::_bind_methods() {
 
 	ClassDB::bind_method(D_METHOD("set_shadow_lod_proxy_mesh", "mesh"), &GeometryInstance::set_shadow_lod_proxy_mesh);
 	ClassDB::bind_method(D_METHOD("get_shadow_lod_proxy_mesh"), &GeometryInstance::get_shadow_lod_proxy_mesh);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_relight_inclusion", "inclusion"), &GeometryInstance::set_shadow_relight_inclusion);
+	ClassDB::bind_method(D_METHOD("get_shadow_relight_inclusion"), &GeometryInstance::get_shadow_relight_inclusion);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_relight_self", "enabled"), &GeometryInstance::set_shadow_relight_self);
+	ClassDB::bind_method(D_METHOD("get_shadow_relight_self"), &GeometryInstance::get_shadow_relight_self);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_relight_aabb_enabled", "enabled"), &GeometryInstance::set_shadow_relight_aabb_enabled);
+	ClassDB::bind_method(D_METHOD("get_shadow_relight_aabb_enabled"), &GeometryInstance::get_shadow_relight_aabb_enabled);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_relight_aabb", "aabb"), &GeometryInstance::set_shadow_relight_aabb);
+	ClassDB::bind_method(D_METHOD("get_shadow_relight_aabb"), &GeometryInstance::get_shadow_relight_aabb);
 
 	ClassDB::bind_method(D_METHOD("set_generate_lightmap", "enabled"), &GeometryInstance::set_generate_lightmap);
 	ClassDB::bind_method(D_METHOD("get_generate_lightmap"), &GeometryInstance::get_generate_lightmap);
@@ -450,6 +508,34 @@ void GeometryInstance::_bind_methods() {
 						 "rotation; best for moderate, realistic animation speeds)"),
 			"set_shadow_temporal_cache", "get_shadow_temporal_cache");
 
+	// godot-ports#55: relight-pass culling controls -- only take effect
+	// under a light using SUBTRACTIVE relight (godot-ports#56; the
+	// default, ADDITIVE, ignores all three). In subtractive mode the base
+	// pass already draws every instance fully lit, so the second pass is
+	// purely corrective and safe to skip for anything nothing actually
+	// shadows -- these tune when that skip happens for THIS instance,
+	// both as a potential caster and as a potential receiver.
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_relight_inclusion", PROPERTY_HINT_ENUM,
+						 "Dynamic (default -- decide per-frame via the automatic bounding-volume "
+						 "overlap test against other casters),"
+						 "Always (force this instance into the corrective pass every frame, "
+						 "regardless of the test -- use if the automatic test is wrong for this mesh),"
+						 "Never (force this instance OUT of the corrective pass every frame, "
+						 "regardless of the test -- a hard perf override, e.g. for background/"
+						 "decorative geometry that never needs this light's contribution corrected)"),
+			"set_shadow_relight_inclusion", "get_shadow_relight_inclusion");
+	// Off by default: an instance's own cast shadow is excluded from its
+	// own relight decision (comparing a mesh's bounds against itself can
+	// never yield "skip", see godot-ports#55's own investigation) -- turn
+	// on for a specific non-convex mesh where self-shadowing is visually
+	// worth the extra redraw.
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shadow_relight_self"),
+			"set_shadow_relight_self", "get_shadow_relight_self");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "shadow_relight_aabb_enabled"),
+			"set_shadow_relight_aabb_enabled", "get_shadow_relight_aabb_enabled");
+	ADD_PROPERTY(PropertyInfo(Variant::AABB, "shadow_relight_aabb"),
+			"set_shadow_relight_aabb", "get_shadow_relight_aabb");
+
 	ADD_GROUP("Baked Light", "");
 	ADD_PROPERTYI(PropertyInfo(Variant::BOOL, "use_in_baked_light"), "set_flag", "get_flag", FLAG_USE_BAKED_LIGHT);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "generate_lightmap"), "set_generate_lightmap", "get_generate_lightmap");
@@ -479,6 +565,10 @@ void GeometryInstance::_bind_methods() {
 	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_DIRECTION_QUANTIZED);
 	BIND_ENUM_CONSTANT(SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE);
 
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_INCLUSION_DYNAMIC);
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_INCLUSION_ALWAYS);
+	BIND_ENUM_CONSTANT(SHADOW_RELIGHT_INCLUSION_NEVER);
+
 	BIND_ENUM_CONSTANT(FLAG_USE_BAKED_LIGHT);
 	BIND_ENUM_CONSTANT(FLAG_DRAW_NEXT_FRAME_IF_VISIBLE);
 	BIND_ENUM_CONSTANT(FLAG_MAX);
@@ -493,6 +583,9 @@ GeometryInstance::GeometryInstance() {
 	shadow_geometry_source = SHADOW_GEOMETRY_SOURCE_RENDER_MESH;
 	shadow_silhouette_algorithm = SHADOW_SILHOUETTE_ALGORITHM_FULL;
 	shadow_temporal_cache = SHADOW_TEMPORAL_CACHE_NONE;
+	shadow_relight_inclusion = SHADOW_RELIGHT_INCLUSION_DYNAMIC;
+	shadow_relight_self = false;
+	shadow_relight_aabb_enabled = false;
 	extra_cull_margin = 0;
 	generate_lightmap = true;
 	lightmap_scale = LightmapScale::LIGHTMAP_SCALE_1X;

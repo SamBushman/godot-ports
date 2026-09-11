@@ -251,6 +251,7 @@ public:
 	FUNC3(light_set_param, RID, LightParam, float)
 	FUNC2(light_set_shadow, RID, bool)
 	FUNC2(light_set_shadow_color, RID, const Color &)
+	FUNC2(light_set_shadow_relight_mode, RID, ShadowRelightMode)
 	FUNC2(light_set_projector, RID, RID)
 	FUNC2(light_set_negative, RID, bool)
 	FUNC2(light_set_cull_mask, RID, uint32_t)
@@ -568,6 +569,9 @@ public:
 	FUNC2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
 	FUNC2(instance_geometry_set_shadow_lod_proxy, RID, RID)
 	FUNC3(instance_geometry_set_shadow_ring_topology, RID, int, int)
+	FUNC2(instance_geometry_set_shadow_relight_inclusion, RID, ShadowRelightInclusion)
+	FUNC2(instance_geometry_set_shadow_relight_self, RID, bool)
+	FUNC3(instance_geometry_set_shadow_relight_aabb, RID, bool, const AABB &)
 
 	/* CANVAS (2D) */
 

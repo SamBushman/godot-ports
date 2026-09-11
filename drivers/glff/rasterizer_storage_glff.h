@@ -1216,6 +1216,12 @@ public:
 		// first VS::LIGHT_DIRECTIONAL light it finds to decide whether to
 		// run the shadow-volume pass at all this frame.
 		bool shadow_enabled;
+		// godot-ports#56: additive (default) vs subtractive stencil relight
+		// -- see VisualServer::ShadowRelightMode's own comment for the
+		// full rationale. RasterizerSceneGLFF::render_scene() reads this
+		// off the same primary directional light shadow_enabled comes
+		// from, right above.
+		VS::ShadowRelightMode shadow_relight_mode;
 
 		Light() {
 			type = VS::LIGHT_DIRECTIONAL;
@@ -1228,6 +1234,7 @@ public:
 			reverse_cull = false;
 			use_gi = false;
 			shadow_enabled = false;
+			shadow_relight_mode = VS::SHADOW_RELIGHT_MODE_ADDITIVE;
 		}
 	};
 	mutable RID_Owner<Light> light_owner;
@@ -1252,6 +1259,11 @@ public:
 		Light *l = light_owner.getornull(p_light);
 		ERR_FAIL_COND(!l);
 		l->shadow_enabled = p_enabled;
+	}
+	virtual void light_set_shadow_relight_mode(RID p_light, VS::ShadowRelightMode p_mode) {
+		Light *l = light_owner.getornull(p_light);
+		ERR_FAIL_COND(!l);
+		l->shadow_relight_mode = p_mode;
 	}
 	virtual void light_set_shadow_color(RID p_light, const Color &p_color) {}
 	virtual void light_set_projector(RID p_light, RID p_texture) {}
