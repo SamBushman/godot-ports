@@ -3,7 +3,6 @@
 #include "rasterizer_storage_glff.h"
 #include "core/map.h"
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
 // Transform -> GL column-major 4x4. Basis::xform() (see core/math/basis.h)
@@ -949,14 +948,6 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 
 	int total_rings = side_rings + ((tri_count > side_tri_count) ? 1 : 0); // + 1 synthetic catch-all for any trailing (cap) triangles
 	p_surface->shadow_ring_actual_count = total_rings;
-	// TEMPORARY godot-ports#50 sanity-check print -- confirms the ring
-	// topology hint actually reached here and produced a real, non-empty
-	// ring cache (vs. silently falling back), gated on the same
-	// GLFF_SHADOW_DUMP env var as the #49/#50 dump instrument. Revert
-	// alongside that instrument once this family's verification is done.
-	if (getenv("GLFF_SHADOW_DUMP")) {
-		fprintf(stderr, "GLFF_RING_BUILD radial_segments=%d rings=%d side_rings=%d total_rings=%d tri_count=%d\n", p_radial_segments, p_rings, side_rings, total_rings, tri_count);
-	}
 	p_surface->shadow_ring_tri_start.resize(total_rings);
 	p_surface->shadow_ring_tri_count.resize(total_rings);
 	p_surface->shadow_ring_min_cos_from_y.resize(total_rings);
@@ -1168,43 +1159,6 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 				float beta_hi = Math::acos(CLAMP(min_cy, -1.0f, 1.0f));
 				float min_dot, max_dot;
 				_ring_dot_bounds(beta_lo, beta_hi, p_light_dir_objspace, min_dot, max_dot);
-
-				// TEMPORARY godot-ports#50 self-check: scan this ring's REAL
-				// triangles and compare against the closed-form bound -- if
-				// the bound isn't actually conservative (true range wider
-				// than computed), or if it would produce a classification
-				// that disagrees with a full per-triangle scan of this
-				// ring, print a diagnostic. Gated on GLFF_SHADOW_DUMP,
-				// revert alongside the rest of the verification instrument.
-				if (getenv("GLFF_SHADOW_DUMP")) {
-					float true_min = 1e30f, true_max = -1e30f;
-					bool any_lit = false, any_dark = false;
-					for (int i = start; i < start + count; i++) {
-						float d = nx[i] * p_light_dir_objspace.x + ny[i] * p_light_dir_objspace.y + nz[i] * p_light_dir_objspace.z;
-						float len = Math::sqrt(nx[i] * nx[i] + ny[i] * ny[i] + nz[i] * nz[i]);
-						if (len > CMP_EPSILON) {
-							float dn = d / len; // normalize so it's comparable to min_dot/max_dot (which are in unit-normal terms)
-							if (dn < true_min) {
-								true_min = dn;
-							}
-							if (dn > true_max) {
-								true_max = dn;
-							}
-						}
-						if (d > 0.0f) {
-							any_lit = true;
-						} else {
-							any_dark = true;
-						}
-					}
-					bool bound_unsound = (true_min < min_dot - 0.001f) || (true_max > max_dot + 0.001f);
-					bool classification_wrong = (min_dot > 0.0f && any_dark) || (max_dot <= 0.0f && any_lit);
-					if (bound_unsound || classification_wrong) {
-						fprintf(stderr, "GLFF_RING_SELFCHECK MISMATCH ring=%d start=%d count=%d min_cy=%.4f max_cy=%.4f beta_lo=%.4f beta_hi=%.4f computed_min_dot=%.4f computed_max_dot=%.4f true_min=%.4f true_max=%.4f any_lit=%d any_dark=%d bound_unsound=%d classification_wrong=%d L=(%.4f,%.4f,%.4f)\n",
-								r, start, count, min_cy, max_cy, beta_lo, beta_hi, min_dot, max_dot, true_min, true_max, any_lit, any_dark, bound_unsound, classification_wrong,
-								p_light_dir_objspace.x, p_light_dir_objspace.y, p_light_dir_objspace.z);
-					}
-				}
 
 				if (min_dot > 0.0f) {
 					for (int i = 0; i < count; i++) {
@@ -1675,38 +1629,6 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			CE->value().ring_radial_segments = instance->shadow_ring_radial_segments;
 			CE->value().ring_count = instance->shadow_ring_count;
 			CE->value().bucket_index = bucket_idx;
-
-			// TEMPORARY godot-ports#49/#50 correctness-verification instrumentation
-			// -- dumps the exact emitted shadow-volume triangle list every time
-			// it's rebuilt, gated on an env var so it's zero-cost/inert in any
-			// normal run. Not a permanent feature; revert once #49's
-			// FULL-vs-NORMAL_CONE comparison is confirmed. See
-			// _build_shadow_volume_triangles(): both algorithms iterate
-			// t=0..tri_count-1 in the same fixed order and only differ in how
-			// faces_light[t] gets computed, so two runs of the SAME rotation
-			// sequence differing only in shadow_silhouette_algorithm should
-			// produce byte-identical dumps if (and only if) the cluster
-			// algorithm is correct.
-			{
-				static int dump_enabled = -1;
-				if (dump_enabled < 0) {
-					dump_enabled = getenv("GLFF_SHADOW_DUMP") ? 1 : 0;
-				}
-				if (dump_enabled) {
-					static int dump_counter = 0;
-					char path[256];
-					snprintf(path, sizeof(path), "/tmp/glff_shadow_dump/inst_%p_%04d.txt", (void *)instance, dump_counter++);
-					FILE *f = fopen(path, "w");
-					if (f) {
-						const Vector<Vector3> &dv = CE->value().vol_tris;
-						fprintf(f, "%d\n", dv.size());
-						for (int vi = 0; vi < dv.size(); vi++) {
-							fprintf(f, "%.6f %.6f %.6f\n", dv[vi].x, dv[vi].y, dv[vi].z);
-						}
-						fclose(f);
-					}
-				}
-			}
 		}
 		const Vector<Vector3> &vol_tris = CE->value().vol_tris;
 		if (vol_tris.size() == 0) {
