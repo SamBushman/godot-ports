@@ -787,6 +787,16 @@ public:
 		// per-triangle fallback path -- negligible cost given how few
 		// rings this ever applies to.
 		Vector<bool> shadow_ring_has_degenerate;
+		// godot-ports#53-followup perf fix: acos(min/max_cos_from_y) is a
+		// pure function of this ring'''s own (frame-invariant) topology --
+		// it does NOT depend on the per-frame light direction at all, yet
+		// was being recomputed via 2 acos() calls per ring EVERY FRAME in
+		// the original #50 implementation. Cached once here at ring-build
+		// time instead; the per-frame path only calls the light-direction-
+		// dependent _ring_dot_bounds() now, removing 2 of that function'''s
+		// several per-ring-per-frame transcendental calls entirely.
+		Vector<float> shadow_ring_beta_lo;
+		Vector<float> shadow_ring_beta_hi;
 	};
 
 	struct Mesh : public RID_Data {

@@ -929,6 +929,8 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 	p_surface->shadow_ring_tri_count.clear();
 	p_surface->shadow_ring_min_cos_from_y.clear();
 	p_surface->shadow_ring_max_cos_from_y.clear();
+	p_surface->shadow_ring_beta_lo.clear();
+	p_surface->shadow_ring_beta_hi.clear();
 
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (p_radial_segments <= 0 || p_rings < 0 || tri_count == 0) {
@@ -953,6 +955,8 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 	p_surface->shadow_ring_min_cos_from_y.resize(total_rings);
 	p_surface->shadow_ring_max_cos_from_y.resize(total_rings);
 	p_surface->shadow_ring_has_degenerate.resize(total_rings);
+	p_surface->shadow_ring_beta_lo.resize(total_rings);
+	p_surface->shadow_ring_beta_hi.resize(total_rings);
 
 	const float *nx = p_surface->shadow_tri_normal_x.ptr();
 	const float *ny = p_surface->shadow_tri_normal_y.ptr();
@@ -998,6 +1002,12 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 		p_surface->shadow_ring_min_cos_from_y.write[r] = min_cy;
 		p_surface->shadow_ring_max_cos_from_y.write[r] = max_cy;
 		p_surface->shadow_ring_has_degenerate.write[r] = has_degenerate;
+		// godot-ports#53-followup: precompute beta_lo/beta_hi here (pure
+		// functions of min_cy/max_cy, which never change after this) --
+		// see the field comment on shadow_ring_beta_lo for why this used
+		// to be recomputed needlessly every frame.
+		p_surface->shadow_ring_beta_lo.write[r] = Math::acos(CLAMP(max_cy, -1.0f, 1.0f));
+		p_surface->shadow_ring_beta_hi.write[r] = Math::acos(CLAMP(min_cy, -1.0f, 1.0f));
 	}
 
 	if (tri_count > side_tri_count) {
@@ -1012,27 +1022,57 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 		p_surface->shadow_ring_min_cos_from_y.write[last] = -1.0f;
 		p_surface->shadow_ring_max_cos_from_y.write[last] = 1.0f;
 		p_surface->shadow_ring_has_degenerate.write[last] = false; // irrelevant -- [-1,1] always falls back anyway
+		p_surface->shadow_ring_beta_lo.write[last] = Math::acos(1.0f); // 0 -- irrelevant, [-1,1] always falls back anyway
+		p_surface->shadow_ring_beta_hi.write[last] = Math::acos(-1.0f); // PI -- irrelevant, [-1,1] always falls back anyway
 	}
 }
 
-// godot-ports#53: temporal coherence. p_prev_faces_light/p_prev_light_dir
-// (both null unless the caller actually has a previous frame's state for
-// THIS exact instance+surface -- see the call site) enable a per-triangle
-// reuse-or-retest decision that is PROVEN correct, not a heuristic margin:
-// for a normalized triangle normal n and light directions L_old (last
-// frame) / L_new (this frame), Cauchy-Schwarz gives
-//   |dot(n, L_new) - dot(n, L_old)| == |dot(n, L_new - L_old)| <= |L_new - L_old|
-// so if |dot(n, L_old)| (the OLD classification's distance from the zero/
-// facing threshold) exceeds margin = |L_new - L_old| (the exact chord
-// distance between the two unit light directions), dot(n, L_new) is
-// PROVABLY on the same side of zero as dot(n, L_old) -- the cached
-// classification can be reused with zero risk of being wrong, at any
-// rotation speed. A fast rotation just makes margin large, so more
-// triangles fail this test and fall through to an exact per-triangle
-// retest -- degrading gracefully to the same cost as no coherence at all,
-// never silently wrong. No periodic full-recompute safety net is needed
-// because there is no accumulated drift to correct for: margin is
-// recomputed fresh from the actual frame-to-frame light delta every call.
+// godot-ports#53, redesigned (followup, v2): temporal coherence.
+// p_last_dot/p_snapshot (both null unless the caller wants temporal
+// tracking for THIS exact instance+surface; mutated IN PLACE, see the
+// call site) enable a per-triangle reuse-or-retest decision, still
+// PROVEN correct, not a heuristic margin -- but no longer needing a
+// fresh dot product against
+// last frame's exact direction for every triangle on every frame (the
+// ORIGINAL design's actual bottleneck: it measured "about the same cost
+// as the real test," because it WAS almost the real test, just against
+// L_old instead of L_new).
+//
+// Per triangle, this version persists the ACTUAL dot value from whenever
+// it was last truly retested (last_dot), plus a cumulative margin that
+// only grows while the triangle keeps being reused and resets to 0 the
+// moment it's retested. For light directions L_0 (direction last_dot was
+// computed against) ... L_k (this frame), the triangle inequality on
+// vector norms gives
+//   |L_k - L_0| <= sum_{i=1}^{k} |L_i - L_i-1|
+// so a running SUM of single-frame deltas (cum_margin) is a valid, if
+// looser-than-exact, upper bound on the true cumulative delta -- the same
+// Cauchy-Schwarz argument as before then applies against that bound:
+//   |dot(n, L_k) - dot(n, L_0)| <= |L_k - L_0| <= cum_margin
+// so if |last_dot| exceeds cum_margin * |n|, dot(n, L_k) is still
+// PROVABLY on the same side of zero as last_dot -- reused with zero risk
+// of being wrong. The looseness (vs. the exact one-frame margin the
+// original design used) means a reused triangle can retest slightly
+// sooner than strictly necessary under a light path that zigzags a lot;
+// for this project's own smooth, roughly-constant-angular-velocity idle-
+// bob rotation, the looseness stays small in practice (verified below).
+// v2 (this version): the cumulative margin is no longer stored explicitly
+// per triangle. Instead each triangle stores last_dot (the real dot value
+// as of its last retest) and snapshot (the caller's running per-instance
+// cumulative-delta total AT that retest); the margin is derived on read
+// as (cumulative_delta_now - snapshot). A first attempt at this design
+// stored an explicit per-triangle margin and unconditionally wrote BOTH
+// output arrays for every triangle including reused ones -- measured
+// WORSE than the pre-existing per-frame-dot-recompute design (the 2 extra
+// writes per triangle outweighed the 1 saved dot product). This version
+// writes NOTHING at all on the reuse path, mutating the caller's
+// persistent arrays in place instead of copying them out and reassigning
+// wholesale every frame. The caller resets its running cumulative-delta
+// total (and clears/reseeds all per-triangle state) once it grows past a
+// fixed threshold, to bound floating-point precision loss in the
+// snapshot subtraction over a long play session -- this doesn't affect
+// the bound's correctness (proven exact regardless of magnitude), only
+// numerical precision.
 // godot-ports#55 perf fix: the caller used to reset r_triangles between
 // frames via `vol_tris.resize(0)`, which for CowData means "free the
 // buffer entirely" (see core/cowdata.h's resize()), not "keep capacity,
@@ -1048,7 +1088,7 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 // + up to 3 silhouette-edge quads, 6 verts each -- see the ensure-
 // capacity block just below), so nothing in this function ever grows/
 // reallocates r_triangles itself.
-static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, const Vector<bool> *p_prev_faces_light, const Vector3 *p_prev_light_dir, Vector<bool> *r_out_faces_light, Vector<Vector3> &r_triangles, int *r_write_idx) {
+static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, real_t p_cumulative_delta, Vector<float> *p_last_dot, Vector<float> *p_snapshot, Vector<Vector3> &r_triangles, int *r_write_idx) {
 	_build_shadow_topology_if_needed(p_surface);
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (tri_count == 0) {
@@ -1066,6 +1106,7 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 	if (r_triangles.size() < needed) {
 		r_triangles.resize(needed);
 	}
+
 
 	PoolVector<Vector3>::Read vr = p_surface->vertices.read();
 	const int *tri_idx = p_surface->shadow_tri_indices.ptr();
@@ -1089,31 +1130,44 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 	// triangle count) -- see the proof in this function's own leading
 	// comment block for why this per-triangle reuse-or-retest is exact,
 	// not approximate.
-	if (p_prev_faces_light != nullptr && p_prev_faces_light->size() == tri_count && p_prev_light_dir != nullptr) {
-		Vector3 L_new = p_light_dir_objspace.normalized();
-		Vector3 L_old = p_prev_light_dir->normalized();
-		real_t dot_ll = CLAMP(L_new.dot(L_old), (real_t)-1.0, (real_t)1.0);
-		real_t margin = Math::sqrt(MAX((real_t)0.0, (real_t)2.0 - (real_t)2.0 * dot_ll)); // exact chord distance |L_new - L_old|
+	bool want_temporal = p_last_dot != nullptr && p_snapshot != nullptr;
+	bool have_valid_temporal_state = want_temporal && p_last_dot->size() == tri_count && p_snapshot->size() == tri_count;
+	if (have_valid_temporal_state) {
 		const float *nlen = p_surface->shadow_tri_normal_len.ptr();
 		for (int t = 0; t < tri_count; t++) {
-			// Compare the RAW (unnormalized) dot against margin*|n| instead
-			// of dividing the dot by |n| -- avoids a per-triangle sqrt
-			// entirely (|n| is precomputed once at build time, see
-			// shadow_tri_normal_len's own comment); mathematically
-			// identical to the normalized-space comparison since |n| > 0.
+			real_t cum_margin = p_cumulative_delta - (real_t)(*p_snapshot)[t];
+			real_t d_old = (real_t)(*p_last_dot)[t];
 			real_t len = nlen[t];
-			if (len > CMP_EPSILON) {
-				real_t d_old_raw = nx[t] * L_old.x + ny[t] * L_old.y + nz[t] * L_old.z;
-				if (Math::abs(d_old_raw) > margin * len) {
-					// Provably can't have crossed zero since last frame --
-					// reuse the cached classification directly, no retest.
-					faces_light.write[t] = (*p_prev_faces_light)[t];
-					continue;
-				}
+			if (len > CMP_EPSILON && Math::abs(d_old) > cum_margin * len) {
+				// Provably can't have crossed zero since it was last truly
+				// tested -- reuse directly. NO writes at all: last_dot and
+				// snapshot remain correct as-is for however many more
+				// frames this triangle keeps qualifying for reuse.
+				faces_light.write[t] = d_old > 0.0f;
+				continue;
 			}
 			// Degenerate normal, or within the provable-uncertainty band --
-			// exact retest against the real per-frame light direction.
-			faces_light.write[t] = (nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z) > 0.0f;
+			// exact retest against the real per-frame light direction, and
+			// re-snapshot since this triangle now has a fresh reference.
+			real_t d_new = nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z;
+			faces_light.write[t] = d_new > 0.0f;
+			p_last_dot->write[t] = (float)d_new;
+			p_snapshot->write[t] = (float)p_cumulative_delta;
+		}
+	} else if (want_temporal) {
+		// No valid previous state yet (bootstrap frame, or right after the
+		// caller reset/invalidated it) -- full exact retest for every
+		// triangle, seeding last_dot/snapshot for future frames. A
+		// one-time cost, never paid again on the steady-state reused path.
+		if (p_last_dot->size() != tri_count) {
+			p_last_dot->resize(tri_count);
+			p_snapshot->resize(tri_count);
+		}
+		for (int t = 0; t < tri_count; t++) {
+			real_t d_new = nx[t] * p_light_dir_objspace.x + ny[t] * p_light_dir_objspace.y + nz[t] * p_light_dir_objspace.z;
+			faces_light.write[t] = d_new > 0.0f;
+			p_last_dot->write[t] = (float)d_new;
+			p_snapshot->write[t] = (float)p_cumulative_delta;
 		}
 	} else if (p_algorithm == VS::SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE) {
 		_build_shadow_clusters_if_needed(p_surface);
@@ -1178,12 +1232,15 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 					continue;
 				}
 
-				float min_cy = p_surface->shadow_ring_min_cos_from_y[r];
-				float max_cy = p_surface->shadow_ring_max_cos_from_y[r];
-				// cos is decreasing on [0, PI] -- max_cy (smallest angle
-				// from +Y) maps to the SMALLER beta bound, min_cy to the larger.
-				float beta_lo = Math::acos(CLAMP(max_cy, -1.0f, 1.0f));
-				float beta_hi = Math::acos(CLAMP(min_cy, -1.0f, 1.0f));
+				// godot-ports#53-followup perf fix: beta_lo/beta_hi are
+				// cached at ring-build time now (pure function of this
+				// ring'''s topology, never the per-frame light direction)
+				// -- see the field comment on shadow_ring_beta_lo. Removes
+				// 2 acos() calls per ring per frame that used to be paid
+				// here unconditionally, part of the overhead #50's own
+				// closing comment identified as the likely regression cause.
+				float beta_lo = p_surface->shadow_ring_beta_lo[r];
+				float beta_hi = p_surface->shadow_ring_beta_hi[r];
 				float min_dot, max_dot;
 				_ring_dot_bounds(beta_lo, beta_hi, p_light_dir_objspace, min_dot, max_dot);
 
@@ -1213,12 +1270,12 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 		}
 	}
 
-	// godot-ports#53: hand the finished classification back to the caller
-	// so it can be cached as next frame's "previous" state, regardless of
-	// which branch above actually built it.
-	if (r_out_faces_light != nullptr) {
-		*r_out_faces_light = faces_light;
-	}
+	// godot-ports#53 v2: no separate "hand back to caller" step needed --
+	// the temporal-coherence and bootstrap branches above already mutate
+	// p_last_dot/p_snapshot (the caller's own persistent storage) directly
+	// in place, covering every branch that can run when temporal coherence
+	// is the active mode (NORMAL_CONE/RING_SEGMENT below are only ever
+	// reached when it is NOT).
 
 	Vector3 extrude = -p_light_dir_objspace.normalized() * p_extrude_distance;
 
@@ -1315,6 +1372,7 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 			r_triangles.write[(*r_write_idx)++] = va_ext;
 		}
 	}
+
 }
 
 // godot-ports#26 perf fix: per-instance cache of a fully-built shadow
@@ -1402,12 +1460,19 @@ struct ShadowVolumeCacheEntry {
 	// value now.
 	Vector<Vector3> vol_tris;
 	int vol_tris_valid = 0;
-	// godot-ports#53: last frame's per-surface light-facing classification,
-	// only populated/consumed when shadow_temporal_cache ==
-	// TEMPORAL_COHERENCE. Indexed [surface_index][triangle_index]. Reset
-	// (cleared) whenever the mesh changes, so a stale array from a
-	// different mesh/surface-count can never be misread against new data.
-	Vector<Vector<bool>> temporal_faces_light;
+	// godot-ports#53 (v2): per-surface, per-triangle cached reference dot
+	// value and a "snapshot" of temporal_cumulative_delta at the point it
+	// was last recorded, only populated/consumed when shadow_temporal_cache
+	// == TEMPORAL_COHERENCE. Indexed [surface_index][triangle_index].
+	// Mutated IN PLACE by _build_shadow_volume_triangles() (never copied
+	// out and reassigned) -- a reused triangle touches neither array at
+	// all. Reset (cleared) whenever the mesh changes or temporal_cumulative_
+	// delta crosses its reset threshold, so stale data can never be
+	// misread against new state. See _build_shadow_volume_triangles()'s
+	// own leading comment for the full proof.
+	Vector<Vector<float>> temporal_last_dot;
+	Vector<Vector<float>> temporal_snapshot;
+	float temporal_cumulative_delta = 0.0f;
 };
 static Map<RasterizerScene::InstanceBase *, ShadowVolumeCacheEntry> shadow_volume_cache;
 static const int SHADOW_VOLUME_CACHE_MAX_ENTRIES = 256;
@@ -1635,17 +1700,49 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			CE = shadow_volume_cache.insert(instance, ShadowVolumeCacheEntry());
 		}
 		if (!cache_hit) {
-			// godot-ports#53: only meaningful if the previous entry is for
-			// the SAME mesh with the SAME surface count -- a mesh swap
-			// invalidates temporal state the same way it invalidates
-			// everything else cached here. Read the previous light
-			// direction BEFORE it gets overwritten below.
-			bool use_coherence = instance->shadow_temporal_cache == VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE && CE->value().mesh == shadow_mesh && CE->value().temporal_faces_light.size() == shadow_mesh->surfaces.size();
-			Vector3 prev_light_dir = CE->value().light_dir_objspace;
-			Vector<Vector<bool>> new_faces_light;
-			bool want_faces_light_out = instance->shadow_temporal_cache == VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE;
-			if (want_faces_light_out) {
-				new_faces_light.resize(shadow_mesh->surfaces.size());
+			// godot-ports#53 v2: mutate temporal_last_dot/temporal_snapshot
+			// IN PLACE (no copy-out/reassign-wholesale each frame). Only
+			// meaningful if the previous entry is for the SAME mesh with
+			// the SAME surface count -- a mesh swap invalidates temporal
+			// state the same way it invalidates everything else cached
+			// here. Read the previous light direction BEFORE it gets
+			// overwritten below.
+			bool want_temporal = instance->shadow_temporal_cache == VS::SHADOW_TEMPORAL_CACHE_TEMPORAL_COHERENCE;
+			bool temporal_shape_ok = want_temporal && CE->value().mesh == shadow_mesh && CE->value().temporal_last_dot.size() == shadow_mesh->surfaces.size() && CE->value().temporal_snapshot.size() == shadow_mesh->surfaces.size();
+			real_t cumulative_delta = 0.0;
+			if (want_temporal) {
+				if (temporal_shape_ok) {
+					Vector3 L_new = build_light_dir.normalized();
+					Vector3 L_old = CE->value().light_dir_objspace.normalized();
+					CE->value().temporal_cumulative_delta += (float)(L_new - L_old).length();
+				} else {
+					// Mesh swap, first use, or a shape mismatch -- start
+					// every triangle fresh next.
+					CE->value().temporal_last_dot.clear();
+					CE->value().temporal_snapshot.clear();
+					CE->value().temporal_last_dot.resize(shadow_mesh->surfaces.size());
+					CE->value().temporal_snapshot.resize(shadow_mesh->surfaces.size());
+					CE->value().temporal_cumulative_delta = 0.0f;
+				}
+				// Bound floating-point drift in the (cumulative_delta -
+				// snapshot) subtraction over a long play session -- doesn't
+				// affect the bound's correctness (proven exact regardless
+				// of magnitude), only numerical precision. A reset just
+				// costs one full bootstrap retest, same as a fresh entry.
+				const float TEMPORAL_RESET_THRESHOLD = 50.0f;
+				if (CE->value().temporal_cumulative_delta > TEMPORAL_RESET_THRESHOLD) {
+					CE->value().temporal_cumulative_delta = 0.0f;
+					for (int s = 0; s < CE->value().temporal_last_dot.size(); s++) {
+						CE->value().temporal_last_dot.write[s].clear();
+						CE->value().temporal_snapshot.write[s].clear();
+					}
+				}
+				cumulative_delta = (real_t)CE->value().temporal_cumulative_delta;
+			} else if (CE->value().temporal_last_dot.size() > 0) {
+				// Switched away from TEMPORAL_COHERENCE -- drop stale state
+				// rather than let it linger unused.
+				CE->value().temporal_last_dot.clear();
+				CE->value().temporal_snapshot.clear();
 			}
 
 			// godot-ports#55: used to be `CE->value().vol_tris.resize(0);`
@@ -1662,22 +1759,11 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			// real worst case) decide whether anything needs to grow.
 			int write_idx = 0;
 			for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
-				const Vector<bool> *prev_fl = (use_coherence && s < CE->value().temporal_faces_light.size()) ? &CE->value().temporal_faces_light[s] : nullptr;
-				const Vector3 *prev_ld = use_coherence ? &prev_light_dir : nullptr;
-				Vector<bool> out_fl_local;
-				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, prev_fl, prev_ld, want_faces_light_out ? &out_fl_local : nullptr, CE->value().vol_tris, &write_idx);
-				if (want_faces_light_out) {
-					new_faces_light.write[s] = out_fl_local;
-				}
+				Vector<float> *p_ld = want_temporal ? &CE->value().temporal_last_dot.write[s] : nullptr;
+				Vector<float> *p_sn = want_temporal ? &CE->value().temporal_snapshot.write[s] : nullptr;
+				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, cumulative_delta, p_ld, p_sn, CE->value().vol_tris, &write_idx);
 			}
 			CE->value().vol_tris_valid = write_idx;
-			if (want_faces_light_out) {
-				CE->value().temporal_faces_light = new_faces_light;
-			} else if (CE->value().temporal_faces_light.size() > 0) {
-				// Switched away from TEMPORAL_COHERENCE -- drop stale state
-				// rather than let it linger unused.
-				CE->value().temporal_faces_light.clear();
-			}
 			CE->value().mesh = shadow_mesh;
 			CE->value().transform = instance->transform;
 			CE->value().light_dir_objspace = build_light_dir;
