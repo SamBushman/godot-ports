@@ -1896,6 +1896,14 @@ void VisualServerScene::instance_geometry_set_shadow_lod_proxy(RID p_instance, R
 	instance->shadow_lod_proxy_mesh = p_proxy_mesh;
 }
 
+void VisualServerScene::instance_geometry_set_shadow_billboard_disc(RID p_instance, float p_radius, const Vector3 &p_offset) {
+	Instance *instance = instance_owner.get(p_instance);
+	ERR_FAIL_COND(!instance);
+
+	instance->shadow_billboard_disc_radius = p_radius;
+	instance->shadow_billboard_disc_offset = p_offset;
+}
+
 void VisualServerScene::instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings) {
 	Instance *instance = instance_owner.get(p_instance);
 	ERR_FAIL_COND(!instance);

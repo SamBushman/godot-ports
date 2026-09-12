@@ -570,6 +570,7 @@ public:
 	FUNC2(instance_geometry_set_shadow_silhouette_algorithm, RID, ShadowSilhouetteAlgorithm)
 	FUNC2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
 	FUNC2(instance_geometry_set_shadow_lod_proxy, RID, RID)
+	FUNC3(instance_geometry_set_shadow_billboard_disc, RID, float, const Vector3 &)
 	FUNC3(instance_geometry_set_shadow_ring_topology, RID, int, int)
 	FUNC2(instance_geometry_set_shadow_relight_inclusion, RID, ShadowRelightInclusion)
 	FUNC2(instance_geometry_set_shadow_relight_self, RID, bool)

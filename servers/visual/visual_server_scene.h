@@ -875,6 +875,7 @@ public:
 	virtual void instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, VS::ShadowSilhouetteAlgorithm p_algorithm);
 	virtual void instance_geometry_set_shadow_temporal_cache(RID p_instance, VS::ShadowTemporalCache p_cache);
 	virtual void instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh);
+	virtual void instance_geometry_set_shadow_billboard_disc(RID p_instance, float p_radius, const Vector3 &p_offset);
 	virtual void instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings);
 	virtual void instance_geometry_set_shadow_relight_inclusion(RID p_instance, VS::ShadowRelightInclusion p_inclusion);
 	virtual void instance_geometry_set_shadow_relight_self(RID p_instance, bool p_enabled);

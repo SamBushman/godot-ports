@@ -1031,6 +1031,7 @@ public:
 	enum ShadowGeometrySource {
 		SHADOW_GEOMETRY_SOURCE_RENDER_MESH, // godot-ports#54 default: walk the actual render mesh, today's behavior
 		SHADOW_GEOMETRY_SOURCE_LOD_PROXY, // godot-ports#51: walk a lower-poly proxy mesh instead
+		SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC, // godot-ports#50 followup: analytic light-facing disc, exact for spherical casters
 	};
 
 	enum ShadowSilhouetteAlgorithm {
@@ -1049,6 +1050,7 @@ public:
 	virtual void instance_geometry_set_shadow_silhouette_algorithm(RID p_instance, ShadowSilhouetteAlgorithm p_algorithm) = 0;
 	virtual void instance_geometry_set_shadow_temporal_cache(RID p_instance, ShadowTemporalCache p_cache) = 0;
 	virtual void instance_geometry_set_shadow_lod_proxy(RID p_instance, RID p_proxy_mesh) = 0;
+	virtual void instance_geometry_set_shadow_billboard_disc(RID p_instance, float p_radius, const Vector3 &p_offset) = 0;
 	// godot-ports#50: (0, 0) means "not a recognized ring-topology primitive" -- see rasterizer.h's InstanceBase field comment.
 	virtual void instance_geometry_set_shadow_ring_topology(RID p_instance, int p_radial_segments, int p_rings) = 0;
 

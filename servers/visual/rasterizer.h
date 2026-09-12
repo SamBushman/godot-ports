@@ -137,6 +137,24 @@ public:
 		int shadow_ring_radial_segments;
 		int shadow_ring_count;
 
+		// godot-ports#50 followup: analytic billboard-disc shadow geometry
+		// source, exact (not approximate) for a genuinely spherical
+		// caster -- a sphere's silhouette from any direction is always a
+		// circle of the sphere's own radius, so a disc of that radius
+		// built fresh each frame facing the light produces an identical
+		// shadow volume to the real mesh, with none of the classification/
+		// edge-walk cost a real mesh needs. shadow_billboard_disc_offset
+		// is a LOCAL-space center offset, separate from the instance's own
+		// transform, for content where the spherical part isn't centered
+		// on the node's own origin (e.g. one round part of a larger mesh).
+		// Only meaningful when shadow_geometry_source ==
+		// SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC; content author sets the
+		// radius explicitly (same "explicit over guessing" precedent as
+		// shadow_ring_radial_segments/shadow_lod_proxy_mesh above -- this
+		// never tries to infer a radius from arbitrary mesh geometry).
+		float shadow_billboard_disc_radius;
+		Vector3 shadow_billboard_disc_offset;
+
 		// godot-ports#55: relight-pass culling controls -- only meaningful
 		// under a light using SUBTRACTIVE relight (godot-ports#56; ADDITIVE,
 		// today's default, never reads these). In subtractive mode the base
@@ -202,6 +220,8 @@ public:
 			shadow_temporal_cache = VS::SHADOW_TEMPORAL_CACHE_NONE;
 			shadow_ring_radial_segments = 0;
 			shadow_ring_count = 0;
+			shadow_billboard_disc_radius = 0.5f;
+			shadow_billboard_disc_offset = Vector3();
 			shadow_relight_inclusion = VS::SHADOW_RELIGHT_INCLUSION_DYNAMIC;
 			shadow_relight_self = false;
 			shadow_relight_aabb_enabled = false;

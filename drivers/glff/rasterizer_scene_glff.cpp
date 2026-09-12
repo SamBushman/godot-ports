@@ -859,10 +859,14 @@ static void _build_shadow_clusters_if_needed(RasterizerStorageGLFF::Surface *p_s
 // are each then just that cosine's own min/max over beta in
 // [p_beta_lo, p_beta_hi], handled exactly below (endpoints plus any
 // PI/2*PI crossing inside the range), not sampled/approximated.
-static float _cos_range_extreme(float p_lo, float p_hi, bool p_want_max) {
-	float c_lo = Math::cos((double)p_lo);
-	float c_hi = Math::cos((double)p_hi);
-	float result = p_want_max ? MAX(c_lo, c_hi) : MIN(c_lo, c_hi);
+// godot-ports#50 followup (algebraic): p_c_lo/p_c_hi are now
+// passed in by the caller (computed via the exact angle-sum identity
+// below), instead of this function calling cos() on p_lo/p_hi directly.
+// p_lo/p_hi are still needed as real angle values ONLY for the interval-
+// crossing check further down -- that part is untouched. This is an
+// EXACT substitution, not an approximation: no error margin, no LUT.
+static float _cos_range_extreme(float p_lo, float p_hi, float p_c_lo, float p_c_hi, float p_scale, bool p_want_max) {
+	float result = p_want_max ? MAX(p_c_lo, p_c_hi) : MIN(p_c_lo, p_c_hi);
 	if (p_want_max) {
 		// Does [p_lo, p_hi] contain a point where theta is a multiple of
 		// 2*PI (cos == +1, the unconstrained max)?
@@ -872,7 +876,7 @@ static float _cos_range_extreme(float p_lo, float p_hi, bool p_want_max) {
 			candidate += 2.0 * Math_PI;
 		}
 		if (candidate <= (double)p_hi) {
-			result = 1.0f;
+			result = p_scale;
 		}
 	} else {
 		// Does it contain a point where theta is an odd multiple of PI
@@ -883,13 +887,36 @@ static float _cos_range_extreme(float p_lo, float p_hi, bool p_want_max) {
 			candidate += 2.0 * Math_PI;
 		}
 		if (candidate <= (double)p_hi) {
-			result = -1.0f;
+			result = -p_scale;
 		}
 	}
 	return result;
 }
 
-static void _ring_dot_bounds(float p_beta_lo, float p_beta_hi, const Vector3 &p_light_dir_objspace, float &r_min_dot, float &r_max_dot) {
+// godot-ports#50 followup (algebraic): p_cos_beta_lo/
+// p_sin_beta_lo/p_cos_beta_hi/p_sin_beta_hi are cached per-ring constants
+// (see Surface::shadow_ring_sin_beta_lo's own comment -- cos(beta_lo/hi)
+// need no separate storage, they're exactly the already-cached max/min_
+// cos_from_y). cos(beta +- delta) is computed here via the exact angle-
+// sum identity
+//   cos(beta + delta) = cos(beta)*cos(delta) - sin(beta)*sin(delta)
+//   cos(beta - delta) = cos(beta)*cos(delta) + sin(beta)*sin(delta)
+// using cos(delta) = ly/R, sin(delta) = lxz/R straight from the raw
+// per-frame light vector -- no atan2/acos needed to get THESE, and no
+// cos() call needed at all for the 4 endpoint values this function used
+// to make (2 per _cos_range_extreme() call x 2 calls). Folding the R
+// scaling into these products directly (R*cos(beta) = cos_beta*ly -
+// sin_beta*lxz, etc.) also avoids ever dividing by R for this part --
+// R is only otherwise needed for the degenerate check and the final
+// scale of the two range extremes. atan2() is NOT eliminated: the
+// interval-crossing check inside _cos_range_extreme() still needs a real
+// angle value (beta +- delta) to test against real 2*PI/PI boundaries,
+// and reformulating that test away without reconstructing an angle
+// wasn't found to be sound (a derivative sign-change can't by itself
+// distinguish a max-crossing from a min-crossing). This is still a real
+// reduction: 4 exact cos() calls removed entirely (not approximated),
+// 1 atan2() call remains.
+static void _ring_dot_bounds(float p_beta_lo, float p_beta_hi, float p_cos_beta_lo, float p_sin_beta_lo, float p_cos_beta_hi, float p_sin_beta_hi, const Vector3 &p_light_dir_objspace, float &r_min_dot, float &r_max_dot) {
 	float lxz = Math::sqrt(p_light_dir_objspace.x * p_light_dir_objspace.x + p_light_dir_objspace.z * p_light_dir_objspace.z);
 	float ly = p_light_dir_objspace.y;
 	float R = Math::sqrt(lxz * lxz + ly * ly);
@@ -903,12 +930,20 @@ static void _ring_dot_bounds(float p_beta_lo, float p_beta_hi, const Vector3 &p_
 		return;
 	}
 	float delta = Math::atan2(lxz, ly);
+	// R*cos(beta + delta) = cos_beta*ly - sin_beta*lxz (angle-sum identity,
+	// with cos(delta)=ly/R, sin(delta)=lxz/R, R folded straight in).
+	float r_c_lo_min = p_cos_beta_lo * ly - p_sin_beta_lo * lxz;
+	float r_c_hi_min = p_cos_beta_hi * ly - p_sin_beta_hi * lxz;
+	// R*cos(beta - delta) = cos_beta*ly + sin_beta*lxz.
+	float r_c_lo_max = p_cos_beta_lo * ly + p_sin_beta_lo * lxz;
+	float r_c_hi_max = p_cos_beta_hi * ly + p_sin_beta_hi * lxz;
 	// min uses R*cos(beta + delta); max uses R*cos(beta - delta) -- two
-	// DIFFERENT phase-shifted ranges of beta, not the same one.
-	float cmin = _cos_range_extreme(p_beta_lo + delta, p_beta_hi + delta, false);
-	float cmax = _cos_range_extreme(p_beta_lo - delta, p_beta_hi - delta, true);
-	r_min_dot = R * cmin;
-	r_max_dot = R * cmax;
+	// DIFFERENT phase-shifted ranges of beta, not the same one. Passing
+	// R itself as p_scale means _cos_range_extreme()'''s crossing-override
+	// correctly reports +-R (not +-1) to match these already-R-scaled
+	// endpoint values.
+	r_min_dot = _cos_range_extreme(p_beta_lo + delta, p_beta_hi + delta, r_c_lo_min, r_c_hi_min, R, false);
+	r_max_dot = _cos_range_extreme(p_beta_lo - delta, p_beta_hi - delta, r_c_lo_max, r_c_hi_max, R, true);
 }
 
 // godot-ports#50: ring-level coarse cull build, lazy + keyed on the
@@ -931,6 +966,8 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 	p_surface->shadow_ring_max_cos_from_y.clear();
 	p_surface->shadow_ring_beta_lo.clear();
 	p_surface->shadow_ring_beta_hi.clear();
+	p_surface->shadow_ring_sin_beta_lo.clear();
+	p_surface->shadow_ring_sin_beta_hi.clear();
 
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
 	if (p_radial_segments <= 0 || p_rings < 0 || tri_count == 0) {
@@ -957,6 +994,8 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 	p_surface->shadow_ring_has_degenerate.resize(total_rings);
 	p_surface->shadow_ring_beta_lo.resize(total_rings);
 	p_surface->shadow_ring_beta_hi.resize(total_rings);
+	p_surface->shadow_ring_sin_beta_lo.resize(total_rings);
+	p_surface->shadow_ring_sin_beta_hi.resize(total_rings);
 
 	const float *nx = p_surface->shadow_tri_normal_x.ptr();
 	const float *ny = p_surface->shadow_tri_normal_y.ptr();
@@ -1008,6 +1047,12 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 		// to be recomputed needlessly every frame.
 		p_surface->shadow_ring_beta_lo.write[r] = Math::acos(CLAMP(max_cy, -1.0f, 1.0f));
 		p_surface->shadow_ring_beta_hi.write[r] = Math::acos(CLAMP(min_cy, -1.0f, 1.0f));
+		{
+			float cbl = CLAMP(max_cy, -1.0f, 1.0f);
+			float cbh = CLAMP(min_cy, -1.0f, 1.0f);
+			p_surface->shadow_ring_sin_beta_lo.write[r] = Math::sqrt(MAX(0.0f, 1.0f - cbl * cbl));
+			p_surface->shadow_ring_sin_beta_hi.write[r] = Math::sqrt(MAX(0.0f, 1.0f - cbh * cbh));
+		}
 	}
 
 	if (tri_count > side_tri_count) {
@@ -1024,6 +1069,8 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 		p_surface->shadow_ring_has_degenerate.write[last] = false; // irrelevant -- [-1,1] always falls back anyway
 		p_surface->shadow_ring_beta_lo.write[last] = Math::acos(1.0f); // 0 -- irrelevant, [-1,1] always falls back anyway
 		p_surface->shadow_ring_beta_hi.write[last] = Math::acos(-1.0f); // PI -- irrelevant, [-1,1] always falls back anyway
+		p_surface->shadow_ring_sin_beta_lo.write[last] = 0.0f; // irrelevant, [-1,1] always falls back anyway
+		p_surface->shadow_ring_sin_beta_hi.write[last] = 0.0f; // irrelevant, [-1,1] always falls back anyway
 	}
 }
 
@@ -1088,6 +1135,80 @@ static void _build_shadow_rings_if_needed(RasterizerStorageGLFF::Surface *p_surf
 // + up to 3 silhouette-edge quads, 6 verts each -- see the ensure-
 // capacity block just below), so nothing in this function ever grows/
 // reallocates r_triangles itself.
+// godot-ports#50 followup: analytic billboard-disc shadow
+// volume. A sphere's silhouette from ANY external viewpoint is always
+// EXACTLY a circle of the sphere's own radius, lying in the plane
+// through its center perpendicular to the view/light direction -- not
+// an approximation, a geometric fact about spheres specifically. A disc
+// of that exact radius, built fresh each frame in that exact plane,
+// therefore produces a shadow volume IDENTICAL to the real sphere
+// mesh's own classify+emit result, for any light direction.
+//
+// Unlike the general per-triangle path, this needs NO classification and
+// NO edge-adjacency walk at all: since the disc always faces the light
+// by construction, we already know, unconditionally, which triangles are
+// lit (100%, always) and which edges are silhouette walls (100% of the
+// outer boundary, always -- the internal fan edges between adjacent
+// wedges are NEVER silhouette, since both neighboring wedges are always
+// lit too). The only genuinely per-frame quantity is the ring's actual
+// 3D positions, since the disc's orientation must track the current
+// object-space light direction (which changes every frame purely from
+// the caster's own rotation, even though the world-space light is
+// fixed) -- the topology (which vertex indices form which triangles)
+// never changes and is emitted the same way every call.
+static void _build_billboard_disc_shadow_triangles(float p_radius, const Vector3 &p_center_local, const Vector3 &p_light_dir_objspace, float p_extrude_distance, int p_segments, Vector<Vector3> &r_triangles, int *r_write_idx) {
+	Vector3 light_dir = p_light_dir_objspace.normalized();
+	// Two orthonormal basis vectors spanning the plane perpendicular to
+	// light_dir, chosen so basis1 x basis2 == light_dir exactly (verified
+	// by the vector triple product identity) -- this fixes the winding
+	// convention used below to match the real mesh path's "front cap
+	// normal faces the light" rule.
+	Vector3 ref = (Math::abs(light_dir.y) < 0.99f) ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
+	Vector3 basis1 = light_dir.cross(ref).normalized();
+	Vector3 basis2 = light_dir.cross(basis1).normalized();
+
+	int needed = *r_write_idx + p_segments * 12; // (cap + back-cap + wall) = 4 triangles/segment, 3 verts each
+	if (r_triangles.size() < needed) {
+		r_triangles.resize(needed);
+	}
+
+	Vector3 extrude = -light_dir * p_extrude_distance;
+	Vector3 center_ext = p_center_local + extrude;
+
+	Vector<Vector3> ring;
+	ring.resize(p_segments);
+	for (int i = 0; i < p_segments; i++) {
+		float theta = (float)i * (2.0f * (float)Math_PI / (float)p_segments);
+		ring.write[i] = p_center_local + basis1 * (p_radius * Math::cos(theta)) + basis2 * (p_radius * Math::sin(theta));
+	}
+
+	for (int i = 0; i < p_segments; i++) {
+		int j = (i + 1) % p_segments;
+		Vector3 va = ring[i];
+		Vector3 vb = ring[j];
+		Vector3 va_ext = va + extrude;
+		Vector3 vb_ext = vb + extrude;
+
+		// Front cap wedge: normal along +light_dir (matches "lit triangle"
+		// convention -- see the basis construction comment above).
+		r_triangles.write[(*r_write_idx)++] = p_center_local;
+		r_triangles.write[(*r_write_idx)++] = va;
+		r_triangles.write[(*r_write_idx)++] = vb;
+		// Back cap wedge: same, extruded, winding reversed.
+		r_triangles.write[(*r_write_idx)++] = center_ext;
+		r_triangles.write[(*r_write_idx)++] = vb_ext;
+		r_triangles.write[(*r_write_idx)++] = va_ext;
+		// Silhouette wall quad for this boundary segment -- unconditional,
+		// every segment is a silhouette edge by construction.
+		r_triangles.write[(*r_write_idx)++] = va;
+		r_triangles.write[(*r_write_idx)++] = vb;
+		r_triangles.write[(*r_write_idx)++] = vb_ext;
+		r_triangles.write[(*r_write_idx)++] = va;
+		r_triangles.write[(*r_write_idx)++] = vb_ext;
+		r_triangles.write[(*r_write_idx)++] = va_ext;
+	}
+}
+
 static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_surface, const Vector3 &p_light_dir_objspace, float p_extrude_distance, VS::ShadowSilhouetteAlgorithm p_algorithm, int p_ring_radial_segments, int p_ring_count, real_t p_cumulative_delta, Vector<float> *p_last_dot, Vector<float> *p_snapshot, Vector<Vector3> &r_triangles, int *r_write_idx) {
 	_build_shadow_topology_if_needed(p_surface);
 	int tri_count = p_surface->shadow_tri_indices.size() / 3;
@@ -1234,15 +1355,26 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 
 				// godot-ports#53-followup perf fix: beta_lo/beta_hi are
 				// cached at ring-build time now (pure function of this
-				// ring'''s topology, never the per-frame light direction)
+				// ring's topology, never the per-frame light direction)
 				// -- see the field comment on shadow_ring_beta_lo. Removes
 				// 2 acos() calls per ring per frame that used to be paid
 				// here unconditionally, part of the overhead #50's own
 				// closing comment identified as the likely regression cause.
+				//
+				// godot-ports#50 followup (algebraic): also
+				// pass cos(beta_lo/hi) (== the already-cached max/min_cos_
+				// from_y, clamped) and sin(beta_lo/hi) (newly cached) so
+				// _ring_dot_bounds() can compute cos(beta +- delta) via an
+				// exact angle-sum identity instead of calling cos() itself
+				// -- see that function's own comment.
 				float beta_lo = p_surface->shadow_ring_beta_lo[r];
 				float beta_hi = p_surface->shadow_ring_beta_hi[r];
+				float cos_beta_lo = CLAMP(p_surface->shadow_ring_max_cos_from_y[r], -1.0f, 1.0f);
+				float cos_beta_hi = CLAMP(p_surface->shadow_ring_min_cos_from_y[r], -1.0f, 1.0f);
+				float sin_beta_lo = p_surface->shadow_ring_sin_beta_lo[r];
+				float sin_beta_hi = p_surface->shadow_ring_sin_beta_hi[r];
 				float min_dot, max_dot;
-				_ring_dot_bounds(beta_lo, beta_hi, p_light_dir_objspace, min_dot, max_dot);
+				_ring_dot_bounds(beta_lo, beta_hi, cos_beta_lo, sin_beta_lo, cos_beta_hi, sin_beta_hi, p_light_dir_objspace, min_dot, max_dot);
 
 				if (min_dot > 0.0f) {
 					for (int i = 0; i < count; i++) {
@@ -1372,7 +1504,6 @@ static void _build_shadow_volume_triangles(RasterizerStorageGLFF::Surface *p_sur
 			r_triangles.write[(*r_write_idx)++] = va_ext;
 		}
 	}
-
 }
 
 // godot-ports#26 perf fix: per-instance cache of a fully-built shadow
@@ -1758,10 +1889,24 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 			// own ensure-capacity check (grow-only, sized to that call's
 			// real worst case) decide whether anything needs to grow.
 			int write_idx = 0;
-			for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
-				Vector<float> *p_ld = want_temporal ? &CE->value().temporal_last_dot.write[s] : nullptr;
-				Vector<float> *p_sn = want_temporal ? &CE->value().temporal_snapshot.write[s] : nullptr;
-				_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, cumulative_delta, p_ld, p_sn, CE->value().vol_tris, &write_idx);
+			// godot-ports#50 followup: billboard-disc geometry source.
+			// See _build_billboard_disc_shadow_triangles()'s own comment
+			// for why this is exact (not approximate) for a genuinely
+			// spherical caster. shadow_billboard_disc_offset is in the
+			// SAME local space _build_shadow_volume_triangles()'s meshes
+			// already use -- the instance's own transform (applied later,
+			// at draw time) still positions/rotates/scales everything as
+			// usual, this is purely an additional local-space center shift
+			// for content whose spherical part isn't centered on the
+			// node's own origin.
+			if (instance->shadow_geometry_source == VS::SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC) {
+				_build_billboard_disc_shadow_triangles(instance->shadow_billboard_disc_radius, instance->shadow_billboard_disc_offset, build_light_dir, SHADOW_EXTRUDE_DISTANCE, 16, CE->value().vol_tris, &write_idx);
+			} else {
+				for (int s = 0; s < shadow_mesh->surfaces.size(); s++) {
+					Vector<float> *p_ld = want_temporal ? &CE->value().temporal_last_dot.write[s] : nullptr;
+					Vector<float> *p_sn = want_temporal ? &CE->value().temporal_snapshot.write[s] : nullptr;
+					_build_shadow_volume_triangles(shadow_mesh->surfaces[s], build_light_dir, SHADOW_EXTRUDE_DISTANCE, instance->shadow_silhouette_algorithm, instance->shadow_ring_radial_segments, instance->shadow_ring_count, cumulative_delta, p_ld, p_sn, CE->value().vol_tris, &write_idx);
+				}
 			}
 			CE->value().vol_tris_valid = write_idx;
 			CE->value().mesh = shadow_mesh;

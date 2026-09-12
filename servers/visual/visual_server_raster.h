@@ -662,6 +662,7 @@ public:
 	BIND2(instance_geometry_set_shadow_silhouette_algorithm, RID, ShadowSilhouetteAlgorithm)
 	BIND2(instance_geometry_set_shadow_temporal_cache, RID, ShadowTemporalCache)
 	BIND2(instance_geometry_set_shadow_lod_proxy, RID, RID)
+	BIND3(instance_geometry_set_shadow_billboard_disc, RID, float, const Vector3 &)
 	BIND3(instance_geometry_set_shadow_ring_topology, RID, int, int)
 	BIND2(instance_geometry_set_shadow_relight_inclusion, RID, ShadowRelightInclusion)
 	BIND2(instance_geometry_set_shadow_relight_self, RID, bool)

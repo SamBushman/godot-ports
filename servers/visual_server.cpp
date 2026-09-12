@@ -2193,6 +2193,7 @@ void VisualServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_silhouette_algorithm", "instance", "algorithm"), &VisualServer::instance_geometry_set_shadow_silhouette_algorithm);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_temporal_cache", "instance", "cache"), &VisualServer::instance_geometry_set_shadow_temporal_cache);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_lod_proxy", "instance", "proxy_mesh"), &VisualServer::instance_geometry_set_shadow_lod_proxy);
+	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_billboard_disc", "instance", "radius", "offset"), &VisualServer::instance_geometry_set_shadow_billboard_disc);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_ring_topology", "instance", "radial_segments", "rings"), &VisualServer::instance_geometry_set_shadow_ring_topology);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_relight_inclusion", "instance", "inclusion"), &VisualServer::instance_geometry_set_shadow_relight_inclusion);
 	ClassDB::bind_method(D_METHOD("instance_geometry_set_shadow_relight_self", "instance", "enabled"), &VisualServer::instance_geometry_set_shadow_relight_self);
@@ -2503,6 +2504,7 @@ void VisualServer::_bind_methods() {
 
 	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_RENDER_MESH);
 	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_LOD_PROXY);
+	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC);
 
 	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_FULL);
 	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE);

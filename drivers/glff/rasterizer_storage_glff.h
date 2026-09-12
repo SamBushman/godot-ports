@@ -797,6 +797,19 @@ public:
 		// several per-ring-per-frame transcendental calls entirely.
 		Vector<float> shadow_ring_beta_lo;
 		Vector<float> shadow_ring_beta_hi;
+		// godot-ports#50 followup (algebraic): sin(beta_lo)/sin(beta_hi),
+		// cached alongside beta_lo/beta_hi. Note cos(beta_lo)/cos(beta_hi)
+		// need no separate storage at all -- they're EXACTLY
+		// shadow_ring_max_cos_from_y/min_cos_from_y (clamped), since
+		// beta_lo/beta_hi ARE acos() of those values by construction.
+		// Together these let _ring_dot_bounds() compute cos(beta +- delta)
+		// via the angle-sum identity from cached per-ring constants and
+		// the raw per-frame light vector, with no per-frame cos() call at
+		// all -- an EXACT identity, not an approximation (see
+		// _ring_dot_bounds()'s own comment). beta in [0, PI] guarantees
+		// sin(beta) >= 0, so the positive sqrt root is always correct.
+		Vector<float> shadow_ring_sin_beta_lo;
+		Vector<float> shadow_ring_sin_beta_hi;
 	};
 
 	struct Mesh : public RID_Data {

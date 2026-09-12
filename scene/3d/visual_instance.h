@@ -124,6 +124,7 @@ public:
 	enum ShadowGeometrySource {
 		SHADOW_GEOMETRY_SOURCE_RENDER_MESH = VS::SHADOW_GEOMETRY_SOURCE_RENDER_MESH,
 		SHADOW_GEOMETRY_SOURCE_LOD_PROXY = VS::SHADOW_GEOMETRY_SOURCE_LOD_PROXY,
+		SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC = VS::SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC,
 	};
 
 	enum ShadowSilhouetteAlgorithm {
@@ -158,6 +159,8 @@ private:
 	ShadowSilhouetteAlgorithm shadow_silhouette_algorithm;
 	ShadowTemporalCache shadow_temporal_cache;
 	Ref<Mesh> shadow_lod_proxy_mesh;
+	float shadow_billboard_disc_radius;
+	Vector3 shadow_billboard_disc_offset;
 	ShadowRelightInclusion shadow_relight_inclusion;
 	bool shadow_relight_self;
 	bool shadow_relight_aabb_enabled;
@@ -189,6 +192,12 @@ public:
 
 	void set_shadow_lod_proxy_mesh(const Ref<Mesh> &p_mesh);
 	Ref<Mesh> get_shadow_lod_proxy_mesh() const;
+
+	void set_shadow_billboard_disc_radius(float p_radius);
+	float get_shadow_billboard_disc_radius() const;
+
+	void set_shadow_billboard_disc_offset(const Vector3 &p_offset);
+	Vector3 get_shadow_billboard_disc_offset() const;
 
 	void set_shadow_relight_inclusion(ShadowRelightInclusion p_inclusion);
 	ShadowRelightInclusion get_shadow_relight_inclusion() const;

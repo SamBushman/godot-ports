@@ -353,6 +353,28 @@ Ref<Mesh> GeometryInstance::get_shadow_lod_proxy_mesh() const {
 	return shadow_lod_proxy_mesh;
 }
 
+void GeometryInstance::set_shadow_billboard_disc_radius(float p_radius) {
+	if (p_radius != shadow_billboard_disc_radius) {
+		shadow_billboard_disc_radius = p_radius;
+		VS::get_singleton()->instance_geometry_set_shadow_billboard_disc(get_instance(), shadow_billboard_disc_radius, shadow_billboard_disc_offset);
+	}
+}
+
+float GeometryInstance::get_shadow_billboard_disc_radius() const {
+	return shadow_billboard_disc_radius;
+}
+
+void GeometryInstance::set_shadow_billboard_disc_offset(const Vector3 &p_offset) {
+	if (p_offset != shadow_billboard_disc_offset) {
+		shadow_billboard_disc_offset = p_offset;
+		VS::get_singleton()->instance_geometry_set_shadow_billboard_disc(get_instance(), shadow_billboard_disc_radius, shadow_billboard_disc_offset);
+	}
+}
+
+Vector3 GeometryInstance::get_shadow_billboard_disc_offset() const {
+	return shadow_billboard_disc_offset;
+}
+
 // godot-ports#55: relight-pass culling controls -- same shape as the #54
 // setters above, only meaningful under SUBTRACTIVE relight (godot-ports#56).
 void GeometryInstance::set_shadow_relight_inclusion(ShadowRelightInclusion p_inclusion) {
@@ -440,6 +462,12 @@ void GeometryInstance::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shadow_lod_proxy_mesh", "mesh"), &GeometryInstance::set_shadow_lod_proxy_mesh);
 	ClassDB::bind_method(D_METHOD("get_shadow_lod_proxy_mesh"), &GeometryInstance::get_shadow_lod_proxy_mesh);
 
+	ClassDB::bind_method(D_METHOD("set_shadow_billboard_disc_radius", "radius"), &GeometryInstance::set_shadow_billboard_disc_radius);
+	ClassDB::bind_method(D_METHOD("get_shadow_billboard_disc_radius"), &GeometryInstance::get_shadow_billboard_disc_radius);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_billboard_disc_offset", "offset"), &GeometryInstance::set_shadow_billboard_disc_offset);
+	ClassDB::bind_method(D_METHOD("get_shadow_billboard_disc_offset"), &GeometryInstance::get_shadow_billboard_disc_offset);
+
 	ClassDB::bind_method(D_METHOD("set_shadow_relight_inclusion", "inclusion"), &GeometryInstance::set_shadow_relight_inclusion);
 	ClassDB::bind_method(D_METHOD("get_shadow_relight_inclusion"), &GeometryInstance::get_shadow_relight_inclusion);
 
@@ -485,10 +513,25 @@ void GeometryInstance::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_geometry_source", PROPERTY_HINT_ENUM,
 						 "Render Mesh (default -- exact silhouette, full render-mesh triangle count),"
 						 "LOD Proxy (godot-ports#51 -- walk shadow_lod_proxy_mesh instead; cheaper, "
-						 "less precise silhouette, good for smooth/round meshes viewed at a distance)"),
+						 "less precise silhouette, good for smooth/round meshes viewed at a distance),"
+						 "Billboard Disc (godot-ports#50 followup -- analytic light-facing disc, EXACT "
+						 "(not approximate) for a genuinely spherical caster; set shadow_billboard_disc_"
+						 "radius to match the render mesh's real radius. Not valid for non-spherical "
+						 "shapes -- a cylinder or box's true silhouette varies with view angle, this "
+						 "technique doesn't apply to those)"),
 			"set_shadow_geometry_source", "get_shadow_geometry_source");
 	ADD_PROPERTY(PropertyInfo(Variant::OBJECT, "shadow_lod_proxy_mesh", PROPERTY_HINT_RESOURCE_TYPE, "Mesh"),
 			"set_shadow_lod_proxy_mesh", "get_shadow_lod_proxy_mesh");
+	ADD_PROPERTY(PropertyInfo(Variant::REAL, "shadow_billboard_disc_radius", PROPERTY_HINT_RANGE, "0.001,1000,0.001,or_greater"),
+			"set_shadow_billboard_disc_radius", "get_shadow_billboard_disc_radius");
+	// Local-space center offset for the disc, separate from this node's own
+	// transform -- needed when the spherical part of the mesh isn't
+	// centered on the node's own origin (e.g. one round part of a larger
+	// composite mesh). The node's existing Transform still positions/
+	// rotates/scales everything as usual; this only shifts the disc's
+	// center WITHIN that local space, on top of it.
+	ADD_PROPERTY(PropertyInfo(Variant::VECTOR3, "shadow_billboard_disc_offset"),
+			"set_shadow_billboard_disc_offset", "get_shadow_billboard_disc_offset");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_silhouette_algorithm", PROPERTY_HINT_ENUM,
 						 "Full (default -- exact per-triangle test every frame, always correct),"
 						 "Normal Cone (godot-ports#49 -- clusters triangles by facing direction; best "
@@ -556,6 +599,7 @@ void GeometryInstance::_bind_methods() {
 
 	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_RENDER_MESH);
 	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_LOD_PROXY);
+	BIND_ENUM_CONSTANT(SHADOW_GEOMETRY_SOURCE_BILLBOARD_DISC);
 
 	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_FULL);
 	BIND_ENUM_CONSTANT(SHADOW_SILHOUETTE_ALGORITHM_NORMAL_CONE);
@@ -581,6 +625,7 @@ GeometryInstance::GeometryInstance() {
 
 	shadow_casting_setting = SHADOW_CASTING_SETTING_ON;
 	shadow_geometry_source = SHADOW_GEOMETRY_SOURCE_RENDER_MESH;
+	shadow_billboard_disc_radius = 0.5f;
 	shadow_silhouette_algorithm = SHADOW_SILHOUETTE_ALGORITHM_FULL;
 	shadow_temporal_cache = SHADOW_TEMPORAL_CACHE_NONE;
 	shadow_relight_inclusion = SHADOW_RELIGHT_INCLUSION_DYNAMIC;
