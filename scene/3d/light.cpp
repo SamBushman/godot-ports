@@ -78,6 +78,22 @@ Light::ShadowRelightMode Light::get_shadow_relight_mode() const {
 	return shadow_relight_mode;
 }
 
+void Light::set_shadow_max_distance_casters(int p_max) {
+	shadow_max_distance_casters = p_max;
+	VS::get_singleton()->light_set_shadow_max_distance_casters(light, p_max);
+}
+int Light::get_shadow_max_distance_casters() const {
+	return shadow_max_distance_casters;
+}
+
+void Light::set_shadow_max_priority_casters(int p_max) {
+	shadow_max_priority_casters = p_max;
+	VS::get_singleton()->light_set_shadow_max_priority_casters(light, p_max);
+}
+int Light::get_shadow_max_priority_casters() const {
+	return shadow_max_priority_casters;
+}
+
 void Light::set_negative(bool p_enable) {
 	negative = p_enable;
 	VS::get_singleton()->light_set_negative(light, p_enable);
@@ -225,6 +241,12 @@ void Light::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_shadow_relight_mode", "mode"), &Light::set_shadow_relight_mode);
 	ClassDB::bind_method(D_METHOD("get_shadow_relight_mode"), &Light::get_shadow_relight_mode);
 
+	ClassDB::bind_method(D_METHOD("set_shadow_max_distance_casters", "max_casters"), &Light::set_shadow_max_distance_casters);
+	ClassDB::bind_method(D_METHOD("get_shadow_max_distance_casters"), &Light::get_shadow_max_distance_casters);
+
+	ClassDB::bind_method(D_METHOD("set_shadow_max_priority_casters", "max_casters"), &Light::set_shadow_max_priority_casters);
+	ClassDB::bind_method(D_METHOD("get_shadow_max_priority_casters"), &Light::get_shadow_max_priority_casters);
+
 	ClassDB::bind_method(D_METHOD("set_negative", "enabled"), &Light::set_negative);
 	ClassDB::bind_method(D_METHOD("is_negative"), &Light::is_negative);
 
@@ -273,6 +295,15 @@ void Light::_bind_methods() {
 						 "shadowed; unlocks GeometryInstance's relight-culling properties, since "
 						 "an instance nothing shadows now needs no correction at all)"),
 			"set_shadow_relight_mode", "get_shadow_relight_mode");
+	// godot-ports#47: GLFF-only, no-op on every other backend (GLES2/GLES3
+	// have no such caster budget at all -- real shadow maps don'''t need
+	// one the same way). Defaults (3/8) match the previously hardcoded
+	// MAX_DISTANCE_CASTERS/MAX_PRIORITY_CASTERS constants exactly, so
+	// existing content is unaffected unless a scene opts into a
+	// different value. Range ceilings are this backend'''s own fixed
+	// ABSOLUTE_MAX_DISTANCE_CASTERS/ABSOLUTE_MAX_PRIORITY_CASTERS.
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_max_distance_casters", PROPERTY_HINT_RANGE, "0,64,1"), "set_shadow_max_distance_casters", "get_shadow_max_distance_casters");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "shadow_max_priority_casters", PROPERTY_HINT_RANGE, "0,32,1"), "set_shadow_max_priority_casters", "get_shadow_max_priority_casters");
 	ADD_GROUP("Editor", "");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "editor_only"), "set_editor_only", "is_editor_only");
 	ADD_GROUP("", "");
@@ -329,6 +360,8 @@ Light::Light(VisualServer::LightType p_type) {
 	set_color(Color(1, 1, 1, 1));
 	set_shadow(false);
 	set_shadow_relight_mode(SHADOW_RELIGHT_MODE_ADDITIVE);
+	set_shadow_max_distance_casters(3);
+	set_shadow_max_priority_casters(8);
 	set_negative(false);
 	set_cull_mask(0xFFFFFFFF);
 

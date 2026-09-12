@@ -2001,6 +2001,8 @@ void VisualServer::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("light_set_shadow", "light", "enabled"), &VisualServer::light_set_shadow);
 	ClassDB::bind_method(D_METHOD("light_set_shadow_color", "light", "color"), &VisualServer::light_set_shadow_color);
 	ClassDB::bind_method(D_METHOD("light_set_shadow_relight_mode", "light", "mode"), &VisualServer::light_set_shadow_relight_mode);
+	ClassDB::bind_method(D_METHOD("light_set_shadow_max_distance_casters", "light", "max_casters"), &VisualServer::light_set_shadow_max_distance_casters);
+	ClassDB::bind_method(D_METHOD("light_set_shadow_max_priority_casters", "light", "max_casters"), &VisualServer::light_set_shadow_max_priority_casters);
 	ClassDB::bind_method(D_METHOD("light_set_projector", "light", "texture"), &VisualServer::light_set_projector);
 	ClassDB::bind_method(D_METHOD("light_set_negative", "light", "enable"), &VisualServer::light_set_negative);
 	ClassDB::bind_method(D_METHOD("light_set_cull_mask", "light", "mask"), &VisualServer::light_set_cull_mask);

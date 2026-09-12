@@ -1223,6 +1223,13 @@ public:
 		// from, right above.
 		VS::ShadowRelightMode shadow_relight_mode;
 
+		// godot-ports#47: per-light override of the previously hardcoded
+		// MAX_DISTANCE_CASTERS/MAX_PRIORITY_CASTERS shadow-caster budget
+		// constants in RasterizerSceneGLFF (drivers/glff/rasterizer_scene_glff.cpp).
+		// Defaults match those constants''' original values exactly.
+		int shadow_max_distance_casters;
+		int shadow_max_priority_casters;
+
 		Light() {
 			type = VS::LIGHT_DIRECTIONAL;
 			color = Color(1, 1, 1);
@@ -1235,6 +1242,8 @@ public:
 			use_gi = false;
 			shadow_enabled = false;
 			shadow_relight_mode = VS::SHADOW_RELIGHT_MODE_ADDITIVE;
+			shadow_max_distance_casters = 3;
+			shadow_max_priority_casters = 8;
 		}
 	};
 	mutable RID_Owner<Light> light_owner;
@@ -1264,6 +1273,16 @@ public:
 		Light *l = light_owner.getornull(p_light);
 		ERR_FAIL_COND(!l);
 		l->shadow_relight_mode = p_mode;
+	}
+	virtual void light_set_shadow_max_distance_casters(RID p_light, int p_max) {
+		Light *l = light_owner.getornull(p_light);
+		ERR_FAIL_COND(!l);
+		l->shadow_max_distance_casters = p_max;
+	}
+	virtual void light_set_shadow_max_priority_casters(RID p_light, int p_max) {
+		Light *l = light_owner.getornull(p_light);
+		ERR_FAIL_COND(!l);
+		l->shadow_max_priority_casters = p_max;
 	}
 	virtual void light_set_shadow_color(RID p_light, const Color &p_color) {}
 	virtual void light_set_projector(RID p_light, RID p_texture) {}

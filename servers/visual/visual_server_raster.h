@@ -329,6 +329,8 @@ public:
 	BIND2(light_set_shadow, RID, bool)
 	BIND2(light_set_shadow_color, RID, const Color &)
 	BIND2(light_set_shadow_relight_mode, RID, ShadowRelightMode)
+	BIND2(light_set_shadow_max_distance_casters, RID, int)
+	BIND2(light_set_shadow_max_priority_casters, RID, int)
 	BIND2(light_set_projector, RID, RID)
 	BIND2(light_set_negative, RID, bool)
 	BIND2(light_set_cull_mask, RID, uint32_t)

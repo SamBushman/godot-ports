@@ -525,6 +525,11 @@ public:
 	// choice -- see VisualServer's own enum comment for the full
 	// rationale. Every other backend's implementation is a no-op.
 	virtual void light_set_shadow_relight_mode(RID p_light, VS::ShadowRelightMode p_mode) = 0;
+	// godot-ports#47: GLFF-only per-light shadow-caster budget override,
+	// no-op on every other backend. Defaults (3/8) match the previously
+	// hardcoded MAX_DISTANCE_CASTERS/MAX_PRIORITY_CASTERS constants.
+	virtual void light_set_shadow_max_distance_casters(RID p_light, int p_max) = 0;
+	virtual void light_set_shadow_max_priority_casters(RID p_light, int p_max) = 0;
 	virtual void light_set_projector(RID p_light, RID p_texture) = 0;
 	virtual void light_set_negative(RID p_light, bool p_enable) = 0;
 	virtual void light_set_cull_mask(RID p_light, uint32_t p_mask) = 0;

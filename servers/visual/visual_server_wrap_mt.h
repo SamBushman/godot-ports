@@ -252,6 +252,8 @@ public:
 	FUNC2(light_set_shadow, RID, bool)
 	FUNC2(light_set_shadow_color, RID, const Color &)
 	FUNC2(light_set_shadow_relight_mode, RID, ShadowRelightMode)
+	FUNC2(light_set_shadow_max_distance_casters, RID, int)
+	FUNC2(light_set_shadow_max_priority_casters, RID, int)
 	FUNC2(light_set_projector, RID, RID)
 	FUNC2(light_set_negative, RID, bool)
 	FUNC2(light_set_cull_mask, RID, uint32_t)

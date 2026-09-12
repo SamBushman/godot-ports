@@ -1420,7 +1420,7 @@ static const int SHADOW_VOLUME_CACHE_MAX_ENTRIES = 256;
 // hitting real geometry. p_light_dir_world is GL's own light-position
 // convention already used elsewhere in this file: the direction FROM a
 // surface TOWARD the light, not the direction the light travels.
-static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, const Transform &p_cam_transform, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count, bool p_subtractive, const Color &p_ambient_color) {
+static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage, GLenum p_gl_light, const Vector3 &p_light_dir_world, const Transform &p_cam_transform, RasterizerScene::InstanceBase **p_cull_result, int p_cull_count, bool p_subtractive, const Color &p_ambient_color, int p_max_distance_casters, int p_max_priority_casters) {
 	if (shadow_volume_cache.size() > SHADOW_VOLUME_CACHE_MAX_ENTRIES) {
 		shadow_volume_cache.clear();
 	}
@@ -1466,10 +1466,19 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	// this file only defines which bit means "always cast," it doesn't
 	// decide who gets it.
 	static const uint32_t PRIORITY_SHADOW_LAYER_BIT = 1u << 31;
-	static const int MAX_PRIORITY_CASTERS = 8;
-	static const int MAX_DISTANCE_CASTERS = 3;
-	int caster_idx[MAX_PRIORITY_CASTERS + MAX_DISTANCE_CASTERS];
-	float caster_dist_sq[MAX_DISTANCE_CASTERS];
+	// godot-ports#47: MAX_DISTANCE_CASTERS/MAX_PRIORITY_CASTERS are now a
+	// per-light configurable budget (Light.shadow_max_distance_casters/
+	// shadow_max_priority_casters, defaulting to today'''s exact 3/8)
+	// instead of hardcoded constants -- clamped to a fixed absolute
+	// ceiling so the backing arrays below can stay plain fixed-size stack
+	// arrays rather than needing a heap allocation for an arbitrary runtime
+	// size.
+	static const int ABSOLUTE_MAX_PRIORITY_CASTERS = 32;
+	static const int ABSOLUTE_MAX_DISTANCE_CASTERS = 64;
+	const int MAX_PRIORITY_CASTERS = CLAMP(p_max_priority_casters, 0, ABSOLUTE_MAX_PRIORITY_CASTERS);
+	const int MAX_DISTANCE_CASTERS = CLAMP(p_max_distance_casters, 0, ABSOLUTE_MAX_DISTANCE_CASTERS);
+	int caster_idx[ABSOLUTE_MAX_PRIORITY_CASTERS + ABSOLUTE_MAX_DISTANCE_CASTERS];
+	float caster_dist_sq[ABSOLUTE_MAX_DISTANCE_CASTERS];
 	int priority_count = 0;
 	int distance_count = 0;
 	for (int i = 0; i < p_cull_count; i++) {
@@ -1727,7 +1736,7 @@ static void _render_primary_shadow_and_relight(RasterizerStorageGLFF *p_storage,
 	// it. This is computed fresh per pair below (caster AABBs cached
 	// unswept here; the receiver loop builds each pair's own swept box).
 	bool subtractive = p_subtractive;
-	AABB caster_world_aabb[MAX_PRIORITY_CASTERS + MAX_DISTANCE_CASTERS];
+	AABB caster_world_aabb[ABSOLUTE_MAX_PRIORITY_CASTERS + ABSOLUTE_MAX_DISTANCE_CASTERS];
 	Vector3 light_travel_dir; // unit vector, the direction light actually travels (away from the light)
 	if (subtractive && caster_count > 0) {
 		light_travel_dir = -p_light_dir_world.normalized();
@@ -2389,6 +2398,11 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// godot-ports#56: additive (default) vs subtractive relight, read off
 	// the same primary directional light shadow_enabled comes from.
 	bool primary_light_relight_subtractive = false;
+	// godot-ports#47: per-light shadow-caster budget override, read off
+	// the same primary directional light. Defaults match the values that
+	// used to be hardcoded (3 distance-budget, 8 priority-budget).
+	int primary_light_max_distance_casters = 3;
+	int primary_light_max_priority_casters = 8;
 
 	int max_lights = MIN(p_light_cull_count, 8);
 	if (max_lights > 0) {
@@ -2432,6 +2446,8 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 					primary_shadow_gl_light = gl_light;
 					primary_light_casts_shadow = light->shadow_enabled;
 					primary_light_relight_subtractive = light->shadow_relight_mode == VS::SHADOW_RELIGHT_MODE_SUBTRACTIVE;
+					primary_light_max_distance_casters = light->shadow_max_distance_casters;
+					primary_light_max_priority_casters = light->shadow_max_priority_casters;
 				}
 			} else {
 				Vector3 origin = li->transform.origin;
@@ -3018,7 +3034,7 @@ void RasterizerSceneGLFF::render_scene(const Transform &p_cam_transform, const C
 	// scene, matching how it already sees the lightmap pass's own
 	// contribution from inside the loop above).
 	if (primary_light_casts_shadow) {
-		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cam_transform, p_cull_result, p_cull_count, primary_light_relight_subtractive, ambient_color);
+		_render_primary_shadow_and_relight(storage, primary_shadow_gl_light, primary_directional_light_dir_world, p_cam_transform, p_cull_result, p_cull_count, primary_light_relight_subtractive, ambient_color, primary_light_max_distance_casters, primary_light_max_priority_casters);
 	}
 
 	// godot-ports#31: capture+blur+blend the fully-composited opaque/

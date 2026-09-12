@@ -81,6 +81,11 @@ private:
 	Color shadow_color;
 	bool shadow;
 	ShadowRelightMode shadow_relight_mode;
+	// godot-ports#47: per-light override of the GLFF backend'''s previously
+	// hardcoded shadow-caster budget (MAX_DISTANCE_CASTERS/MAX_PRIORITY_CASTERS
+	// in rasterizer_scene_glff.cpp). Meaningless on every other backend.
+	int shadow_max_distance_casters;
+	int shadow_max_priority_casters;
 	bool negative;
 	bool reverse_cull;
 	uint32_t cull_mask;
@@ -116,6 +121,12 @@ public:
 
 	void set_shadow_relight_mode(ShadowRelightMode p_mode);
 	ShadowRelightMode get_shadow_relight_mode() const;
+
+	void set_shadow_max_distance_casters(int p_max);
+	int get_shadow_max_distance_casters() const;
+
+	void set_shadow_max_priority_casters(int p_max);
+	int get_shadow_max_priority_casters() const;
 
 	void set_negative(bool p_enable);
 	bool is_negative() const;
