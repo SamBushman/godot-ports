@@ -731,6 +731,8 @@ void EditorSettings::_load_default_text_editor_theme() {
 	_initial_set("text_editor/highlighting/text_color", Color(0.67, 0.67, 0.67));
 	_initial_set("text_editor/highlighting/line_number_color", Color(0.67, 0.67, 0.67, 0.4));
 	_initial_set("text_editor/highlighting/safe_line_number_color", Color(0.67, 0.78, 0.67, 0.6));
+	_initial_set("text_editor/highlighting/vcs_added_line_number_color", Color(0.45, 0.95, 0.45, 0.85));
+	_initial_set("text_editor/highlighting/vcs_modified_line_number_color", Color(0.9, 0.7, 0.35, 0.85));
 	_initial_set("text_editor/highlighting/caret_color", Color(0.67, 0.67, 0.67));
 	_initial_set("text_editor/highlighting/caret_background_color", Color(0, 0, 0));
 	_initial_set("text_editor/highlighting/text_selected_color", Color(0, 0, 0));

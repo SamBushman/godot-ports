@@ -2239,6 +2239,7 @@ void ScriptEditor::save_current_script() {
 	if (text_file != nullptr) {
 		current->apply_code();
 		_save_text_file(text_file, text_file->get_path());
+		_update_vcs_status_markers(current);
 		return;
 	}
 
@@ -2252,6 +2253,14 @@ void ScriptEditor::save_current_script() {
 		}
 	} else {
 		editor->save_resource(resource);
+	}
+	_update_vcs_status_markers(current);
+}
+
+void ScriptEditor::_update_vcs_status_markers(ScriptEditorBase *p_editor) {
+	ScriptTextEditor *ste = Object::cast_to<ScriptTextEditor>(p_editor);
+	if (ste) {
+		ste->update_vcs_status_markers();
 	}
 }
 
@@ -2291,9 +2300,11 @@ void ScriptEditor::save_all_scripts() {
 			Ref<TextFile> text_file = edited_res;
 			if (text_file != nullptr) {
 				_save_text_file(text_file, text_file->get_path());
+				_update_vcs_status_markers(se);
 				continue;
 			}
 			editor->save_resource(edited_res); //external script, save it
+			_update_vcs_status_markers(se);
 		} else {
 			// For built-in scripts, save their scenes instead.
 			const String scene_path = edited_res->get_path().get_slice("::", 0);

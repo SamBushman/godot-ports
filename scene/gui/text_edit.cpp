@@ -1333,7 +1333,22 @@ void TextEdit::_notification(int p_what) {
 								fc = line_num_padding + fc;
 							}
 
-							cache.font->draw(ci, Point2(cache.style_normal->get_margin(MARGIN_LEFT) + cache.breakpoint_gutter_width + cache.info_gutter_width + ofs_x, yofs + cache.font->get_ascent()), fc, text.is_safe(line) ? cache.safe_line_number_color : cache.line_number_color);
+							Color line_number_draw_color = cache.line_number_color;
+						if (text.is_safe(line)) {
+							line_number_draw_color = cache.safe_line_number_color;
+						}
+						// VCS status takes visual priority over the safe/unsafe hint -
+						// it's live information about uncommitted changes, not a
+						// static language-level property of the line.
+						switch (text.get_vcs_status(line)) {
+							case VCS_LINE_STATUS_ADDED:
+								line_number_draw_color = cache.vcs_added_line_number_color;
+								break;
+							case VCS_LINE_STATUS_MODIFIED:
+								line_number_draw_color = cache.vcs_modified_line_number_color;
+								break;
+						}
+						cache.font->draw(ci, Point2(cache.style_normal->get_margin(MARGIN_LEFT) + cache.breakpoint_gutter_width + cache.info_gutter_width + ofs_x, yofs + cache.font->get_ascent()), fc, line_number_draw_color);
 						}
 					}
 
@@ -5429,6 +5444,8 @@ void TextEdit::_update_caches() {
 	cache.caret_background_color = get_color("caret_background_color");
 	cache.line_number_color = get_color("line_number_color");
 	cache.safe_line_number_color = get_color("safe_line_number_color");
+	cache.vcs_added_line_number_color = get_color("vcs_added_line_number_color");
+	cache.vcs_modified_line_number_color = get_color("vcs_modified_line_number_color");
 	cache.font_color = get_color("font_color");
 	cache.font_color_selected = get_color("font_color_selected");
 	cache.font_color_readonly = get_color("font_color_readonly");
@@ -6028,6 +6045,24 @@ void TextEdit::set_line_as_safe(int p_line, bool p_safe) {
 bool TextEdit::is_line_set_as_safe(int p_line) const {
 	ERR_FAIL_INDEX_V(p_line, text.size(), false);
 	return text.is_safe(p_line);
+}
+
+void TextEdit::set_line_vcs_status(int p_line, int p_status) {
+	ERR_FAIL_INDEX(p_line, text.size());
+	text.set_vcs_status(p_line, p_status);
+	update();
+}
+
+int TextEdit::get_line_vcs_status(int p_line) const {
+	ERR_FAIL_INDEX_V(p_line, text.size(), VCS_LINE_STATUS_NONE);
+	return text.get_vcs_status(p_line);
+}
+
+void TextEdit::clear_vcs_status() {
+	for (int i = 0; i < text.size(); i++) {
+		text.set_vcs_status(i, VCS_LINE_STATUS_NONE);
+	}
+	update();
 }
 
 void TextEdit::set_executing_line(int p_line) {

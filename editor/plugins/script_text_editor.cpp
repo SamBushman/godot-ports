@@ -36,6 +36,7 @@
 #include "editor/editor_node.h"
 #include "editor/editor_scale.h"
 #include "editor/editor_settings.h"
+#include "editor/editor_vcs_interface.h"
 #include "editor/script_editor_debugger.h"
 
 void ConnectionInfoDialog::ok_pressed() {
@@ -151,6 +152,10 @@ void ScriptTextEditor::set_edited_resource(const RES &p_res) {
 
 	emit_signal("name_changed");
 	code_editor->update_line_and_column();
+
+	// Show any pre-existing uncommitted changes right away, not just after
+	// the next save.
+	update_vcs_status_markers();
 }
 
 void ScriptTextEditor::enable_editor() {
@@ -213,6 +218,8 @@ void ScriptTextEditor::_load_theme_settings() {
 	Color text_color = EDITOR_GET("text_editor/highlighting/text_color");
 	Color line_number_color = EDITOR_GET("text_editor/highlighting/line_number_color");
 	Color safe_line_number_color = EDITOR_GET("text_editor/highlighting/safe_line_number_color");
+	Color vcs_added_line_number_color = EDITOR_GET("text_editor/highlighting/vcs_added_line_number_color");
+	Color vcs_modified_line_number_color = EDITOR_GET("text_editor/highlighting/vcs_modified_line_number_color");
 	Color caret_color = EDITOR_GET("text_editor/highlighting/caret_color");
 	Color caret_background_color = EDITOR_GET("text_editor/highlighting/caret_background_color");
 	Color text_selected_color = EDITOR_GET("text_editor/highlighting/text_selected_color");
@@ -249,6 +256,8 @@ void ScriptTextEditor::_load_theme_settings() {
 	text_edit->add_color_override("font_color", text_color);
 	text_edit->add_color_override("line_number_color", line_number_color);
 	text_edit->add_color_override("safe_line_number_color", safe_line_number_color);
+	text_edit->add_color_override("vcs_added_line_number_color", vcs_added_line_number_color);
+	text_edit->add_color_override("vcs_modified_line_number_color", vcs_modified_line_number_color);
 	text_edit->add_color_override("caret_color", caret_color);
 	text_edit->add_color_override("caret_background_color", caret_background_color);
 	text_edit->add_color_override("font_color_selected", text_selected_color);
@@ -1434,6 +1443,63 @@ Control *ScriptTextEditor::get_edit_menu() {
 
 Control *ScriptTextEditor::get_code_editor_text_edit() {
 	return code_editor->get_text_edit();
+}
+
+void ScriptTextEditor::update_vcs_status_markers() {
+	if (!EditorVCSInterface::get_singleton()) {
+		return;
+	}
+
+	RES edited_res = get_edited_resource();
+	if (edited_res.is_null() || edited_res->get_path().empty() || edited_res->get_path().find("::") != -1) {
+		// No on-disk path (unsaved/built-in script) - nothing to diff against.
+		return;
+	}
+
+	// Same convention as the VCS dock's own file paths (see
+	// _get_modified_files_data()/_stage_file() in godot-git-plugin): a
+	// path relative to the project root, no "res://" prefix.
+	String rel_path = edited_res->get_path();
+	if (rel_path.begins_with("res://")) {
+		rel_path = rel_path.substr(6, rel_path.length() - 6);
+	}
+
+	TextEdit *text_edit = code_editor->get_text_edit();
+	text_edit->clear_vcs_status();
+
+	List<EditorVCSInterface::DiffHunk> hunks = EditorVCSInterface::get_singleton()->get_line_diff(rel_path, text_edit->get_text());
+	for (List<EditorVCSInterface::DiffHunk>::Element *E = hunks.front(); E; E = E->next()) {
+		const EditorVCSInterface::DiffHunk &hunk = E->get();
+
+		// A hunk with at least one deletion represents replaced content
+		// ("modified"), not purely new content ("added") - approximate
+		// per-line status from that, since a raw unified diff doesn't pair
+		// up individual replaced lines on its own.
+		bool hunk_has_deletion = false;
+		for (const List<EditorVCSInterface::DiffLine>::Element *L = hunk.diff_lines.front(); L; L = L->next()) {
+			if (L->get().old_line_no != -1 && L->get().new_line_no == -1) {
+				hunk_has_deletion = true;
+				break;
+			}
+		}
+
+		for (const List<EditorVCSInterface::DiffLine>::Element *L = hunk.diff_lines.front(); L; L = L->next()) {
+			const EditorVCSInterface::DiffLine &line = L->get();
+			if (line.new_line_no == -1) {
+				// Pure deletion - no corresponding line in the current
+				// buffer to mark. (A "deleted content used to be here"
+				// indicator is a reasonable future addition, not done here.)
+				continue;
+			}
+			int zero_based_line = line.new_line_no - 1;
+			if (zero_based_line < 0 || zero_based_line >= text_edit->get_line_count()) {
+				continue;
+			}
+			if (line.old_line_no == -1) {
+				text_edit->set_line_vcs_status(zero_based_line, hunk_has_deletion ? TextEdit::VCS_LINE_STATUS_MODIFIED : TextEdit::VCS_LINE_STATUS_ADDED);
+			}
+		}
+	}
 }
 
 void ScriptTextEditor::clear_edit_menu() {
