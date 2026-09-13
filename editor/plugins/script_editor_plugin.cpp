@@ -768,6 +768,14 @@ void ScriptEditor::reload_scripts() {
 }
 
 void ScriptEditor::_res_saved_callback(const Ref<Resource> &p_res) {
+	// The one place this needs to happen: EditorNode::_resource_saved()
+	// (the actual ResourceSaver::save() callback, registered once via
+	// ResourceSaver::set_save_callback and invoked for every successful
+	// save anywhere in the editor) re-emits "resource_saved", which this
+	// method is connected to - so this fires uniformly regardless of
+	// which specific UI action triggered the save (explicit script save,
+	// a scene save's external-resources sweep, a subresource sweep,
+	// _save_text_file()'s direct call below, etc).
 	for (int i = 0; i < tab_container->get_child_count(); i++) {
 		ScriptEditorBase *se = Object::cast_to<ScriptEditorBase>(tab_container->get_child(i));
 		if (!se) {
@@ -778,6 +786,7 @@ void ScriptEditor::_res_saved_callback(const Ref<Resource> &p_res) {
 
 		if (script == p_res) {
 			se->tag_saved_version();
+			_update_vcs_status_markers(se);
 		}
 	}
 
@@ -2238,8 +2247,10 @@ void ScriptEditor::save_current_script() {
 
 	if (text_file != nullptr) {
 		current->apply_code();
+		// _save_text_file() calls _res_saved_callback() itself, which
+		// refreshes VCS status markers for the matching open tab - see
+		// that function, not here, for TextFile saves.
 		_save_text_file(text_file, text_file->get_path());
-		_update_vcs_status_markers(current);
 		return;
 	}
 
@@ -2252,9 +2263,16 @@ void ScriptEditor::save_current_script() {
 			editor->save_scene_list(scene_to_save);
 		}
 	} else {
+		// editor->save_resource() -> ResourceSaver::save() -> the
+		// EditorNode::_resource_saved save-callback -> "resource_saved"
+		// signal -> _res_saved_callback(), which refreshes VCS status
+		// markers for the matching open tab. Not done explicitly here -
+		// see _res_saved_callback() for why that's the single place this
+		// needs to happen, covering every save path uniformly (including
+		// ones that don't go through this function at all, like a scene
+		// save implicitly flushing a modified-but-unsaved open script).
 		editor->save_resource(resource);
 	}
-	_update_vcs_status_markers(current);
 }
 
 void ScriptEditor::_update_vcs_status_markers(ScriptEditorBase *p_editor) {
@@ -2299,12 +2317,13 @@ void ScriptEditor::save_all_scripts() {
 		if (edited_res->get_path() != "" && edited_res->get_path().find("local://") == -1 && edited_res->get_path().find("::") == -1) {
 			Ref<TextFile> text_file = edited_res;
 			if (text_file != nullptr) {
+				// See save_current_script() for why VCS markers aren't
+				// refreshed explicitly here - _save_text_file()/
+				// _res_saved_callback() already handle it uniformly.
 				_save_text_file(text_file, text_file->get_path());
-				_update_vcs_status_markers(se);
 				continue;
 			}
 			editor->save_resource(edited_res); //external script, save it
-			_update_vcs_status_markers(se);
 		} else {
 			// For built-in scripts, save their scenes instead.
 			const String scene_path = edited_res->get_path().get_slice("::", 0);
