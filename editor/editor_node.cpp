@@ -5650,6 +5650,21 @@ void EditorNode::_resource_saved(RES p_resource, const String &p_path) {
 	}
 
 	singleton->editor_folding.save_resource_folding(p_resource, p_path);
+
+	// This is the actual universal save hook - ResourceSaver::save() calls
+	// it for every successful save regardless of which UI action triggered
+	// it (explicit script save, a scene save's external-resources sweep,
+	// a subresource sweep, etc). Some higher-level save functions also
+	// emit "resource_saved" themselves for their own specific call site,
+	// which makes this a harmless double-emit for those - the point of
+	// emitting it here too is to reach the paths that don't: a scene save
+	// that implicitly flushes a modified-but-unsaved open script to disk
+	// was silently not refreshing that script's VCS status markers before
+	// this, since ScriptEditor::_res_saved_callback (connected to this
+	// signal) never fired for that path.
+	if (singleton) {
+		singleton->emit_signal("resource_saved", p_resource);
+	}
 }
 
 void EditorNode::_resource_loaded(RES p_resource, const String &p_path) {

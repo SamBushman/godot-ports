@@ -431,6 +431,11 @@ void ScriptTextEditor::reload_text() {
 	te->tag_saved_version();
 
 	code_editor->update_line_and_column();
+
+	// The buffer content just changed (reloaded from disk after an
+	// external edit, or after the debugger reloaded a script) - the VCS
+	// diff against HEAD needs recomputing, same as after a save.
+	update_vcs_status_markers();
 }
 
 void ScriptTextEditor::add_callback(const String &p_function, PoolStringArray p_args) {
