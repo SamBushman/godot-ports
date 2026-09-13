@@ -479,6 +479,8 @@ void fill_default_theme(Ref<Theme> &theme, const Ref<Font> &default_font, const 
 	theme->set_color("brace_mismatch_color", "TextEdit", Color(1, 0.2, 0.2));
 	theme->set_color("line_number_color", "TextEdit", Color(0.67, 0.67, 0.67, 0.4));
 	theme->set_color("safe_line_number_color", "TextEdit", Color(0.67, 0.78, 0.67, 0.6));
+	theme->set_color("vcs_added_line_number_color", "TextEdit", Color(0.45, 0.95, 0.45, 0.85));
+	theme->set_color("vcs_modified_line_number_color", "TextEdit", Color(0.9, 0.7, 0.35, 0.85));
 	theme->set_color("function_color", "TextEdit", Color(0.4, 0.64, 0.81));
 	theme->set_color("member_variable_color", "TextEdit", Color(0.9, 0.31, 0.35));
 	theme->set_color("number_color", "TextEdit", Color(0.92, 0.58, 0.2));

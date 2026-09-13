@@ -237,6 +237,7 @@ public:
 
 	Control *get_edit_menu();
 	Control *get_code_editor_text_edit();
+	void update_vcs_status_markers();
 	virtual void clear_edit_menu();
 	static void register_editor();
 

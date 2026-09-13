@@ -1392,6 +1392,8 @@ Ref<Theme> create_editor_theme(const Ref<Theme> p_theme) {
 	const Color text_color = font_color;
 	const Color line_number_color = dim_color;
 	const Color safe_line_number_color = dim_color * Color(1, 1.2, 1, 1.5);
+	const Color vcs_added_line_number_color = Color(0.45, 0.95, 0.45, 0.85);
+	const Color vcs_modified_line_number_color = Color(0.9, 0.7, 0.35, 0.85);
 	const Color caret_color = mono_color;
 	const Color caret_background_color = mono_color.inverted();
 	const Color text_selected_color = dark_color_3;
@@ -1431,6 +1433,8 @@ Ref<Theme> create_editor_theme(const Ref<Theme> p_theme) {
 		setting->set_initial_value("text_editor/highlighting/text_color", text_color, true);
 		setting->set_initial_value("text_editor/highlighting/line_number_color", line_number_color, true);
 		setting->set_initial_value("text_editor/highlighting/safe_line_number_color", safe_line_number_color, true);
+		setting->set_initial_value("text_editor/highlighting/vcs_added_line_number_color", vcs_added_line_number_color, true);
+		setting->set_initial_value("text_editor/highlighting/vcs_modified_line_number_color", vcs_modified_line_number_color, true);
 		setting->set_initial_value("text_editor/highlighting/caret_color", caret_color, true);
 		setting->set_initial_value("text_editor/highlighting/caret_background_color", caret_background_color, true);
 		setting->set_initial_value("text_editor/highlighting/text_selected_color", text_selected_color, true);

@@ -80,6 +80,7 @@ public:
 			bool hidden : 1;
 			bool safe : 1;
 			bool has_info : 1;
+			unsigned int vcs_status : 2; // 0 = none, 1 = added, 2 = modified. See TextEdit::VCSLineStatus. Unsigned: a signed 2-bit field can't hold the value 2.
 			int wrap_amount_cache : 24;
 			Map<int, ColorRegionInfo> region_info;
 			Ref<Texture> info_icon;
@@ -93,6 +94,7 @@ public:
 				hidden = false;
 				safe = false;
 				has_info = false;
+				vcs_status = 0;
 				wrap_amount_cache = 0;
 			}
 		};
@@ -128,6 +130,8 @@ public:
 		bool is_hidden(int p_line) const { return text[p_line].hidden; }
 		void set_safe(int p_line, bool p_safe) { text.write[p_line].safe = p_safe; }
 		bool is_safe(int p_line) const { return text[p_line].safe; }
+		void set_vcs_status(int p_line, int p_status) { text.write[p_line].vcs_status = p_status; }
+		int get_vcs_status(int p_line) const { return text[p_line].vcs_status; }
 		void set_info_icon(int p_line, Ref<Texture> p_icon, String p_info) {
 			if (p_icon.is_null()) {
 				text.write[p_line].has_info = false;
@@ -231,6 +235,8 @@ private:
 		Color caret_background_color;
 		Color line_number_color;
 		Color safe_line_number_color;
+		Color vcs_added_line_number_color;
+		Color vcs_modified_line_number_color;
 		Color font_color;
 		Color font_color_selected;
 		Color font_color_readonly;
@@ -640,6 +646,15 @@ public:
 
 	void set_line_as_safe(int p_line, bool p_safe);
 	bool is_line_set_as_safe(int p_line) const;
+
+	enum VCSLineStatus {
+		VCS_LINE_STATUS_NONE = 0,
+		VCS_LINE_STATUS_ADDED = 1,
+		VCS_LINE_STATUS_MODIFIED = 2,
+	};
+	void set_line_vcs_status(int p_line, int p_status);
+	int get_line_vcs_status(int p_line) const;
+	void clear_vcs_status();
 
 	void set_line_info_icon(int p_line, Ref<Texture> p_icon, String p_info = "");
 	void clear_info_icons();

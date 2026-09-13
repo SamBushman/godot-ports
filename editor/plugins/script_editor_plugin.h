@@ -388,6 +388,7 @@ class ScriptEditor : public PanelContainer {
 	void _help_class_goto(const String &p_desc);
 	void _update_history_arrows();
 	void _save_history();
+	void _update_vcs_status_markers(ScriptEditorBase *p_editor);
 	void _go_to_tab(int p_idx);
 	void _update_history_pos(int p_new_pos);
 	void _update_script_colors();
