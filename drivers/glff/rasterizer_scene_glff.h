@@ -4,6 +4,12 @@
 #include "core/rid.h"
 #include "servers/visual/rasterizer.h"
 
+// Same platform GL header indirection rasterizer_storage_glff.h uses --
+// needed here too now that this header declares a real GLuint field
+// (glow_capture_tex) rather than a hand-picked stand-in type.
+#include "platform_config.h"
+#include GLES2_INCLUDE_H
+
 // 3D scene renderer for the GLFF (OpenGL 1.2 fixed-function) driver.
 // render_scene() (see .cpp) is Phase 3's real mesh/material/lighting path:
 // walks p_cull_result, decodes each RasterizerStorageGLFF::Surface's
@@ -232,13 +238,13 @@ public:
 	// name recaptured every frame via glCopyTexImage2D, not per-mesh
 	// storage (this is a whole-framebuffer post-process, not scene
 	// content), so it doesn't belong in RasterizerStorageGLFF's
-	// Texture/RID_Owner bookkeeping. Plain "unsigned long", not GLuint --
-	// this header (unlike rasterizer_storage_glff.h) never pulls in the
-	// real GL headers, and this Tiger SDK's GLuint is a typedef for
-	// exactly this (confirmed via a real build error: "invalid conversion
-	// from 'unsigned int*' to 'GLuint* {aka long unsigned int*}'" when
-	// this field was plain "unsigned int" instead).
-	unsigned long glow_capture_tex;
+	// Texture/RID_Owner bookkeeping. Real GLuint now that this header
+	// pulls in the platform GL headers (see include above) -- GLuint is
+	// NOT a portable-size guarantee across SDKs (Tiger's 10.4u.sdk types
+	// it as unsigned long, Leopard's 10.5.sdk as unsigned int), so it must
+	// come from the real per-platform header rather than a hardcoded
+	// stand-in type picked to match just one SDK.
+	GLuint glow_capture_tex;
 	// The glow_capture_tex's real allocated size -- ROUNDED UP TO A POWER
 	// OF TWO. This driver (G4/RV250, a 2002-era chip) rejects a direct
 	// glCopyTexImage2D at the viewport's actual (non-POT) size with
